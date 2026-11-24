@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("codexDesk", {
   getState: () => ipcRenderer.invoke("app:get-state"),
   getRateLimits: () => ipcRenderer.invoke("usage:get-rate-limits"),
+  getSkills: (projectPaths) => ipcRenderer.invoke("skills:list", projectPaths),
   chooseFolder: () => ipcRenderer.invoke("dialog:choose-folder"),
   createTask: (input) => ipcRenderer.invoke("tasks:create", input),
   continueTask: (id, prompt) => ipcRenderer.invoke("tasks:continue", id, prompt),

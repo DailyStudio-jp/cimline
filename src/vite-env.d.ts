@@ -13,6 +13,7 @@ export interface RunTask {
   prompt: string;
   cwd: string;
   worktree: boolean;
+  runner?: "app-server" | "exec";
   usage: TokenUsage;
   status: "running" | "stopping" | "completed" | "failed" | "stopped";
   startedAt: string;
@@ -44,6 +45,19 @@ export interface CodexRateLimits {
   secondary: CodexRateLimitWindow | null;
 }
 
+export interface CodexSkill {
+  name: string;
+  description: string;
+  scope: "user" | "project" | "system" | "codex-home" | "plugin";
+  path: string;
+  projectPath?: string;
+}
+
+export interface CodexSkillsResult {
+  skills: CodexSkill[];
+  warnings: string[];
+}
+
 export interface InitialState {
   tasks: RunTask[];
   cliAvailable: boolean;
@@ -53,6 +67,7 @@ export interface InitialState {
 export interface CodexDeskApi {
   getState: () => Promise<InitialState>;
   getRateLimits: () => Promise<CodexRateLimits>;
+  getSkills: (projectPaths: string[]) => Promise<CodexSkillsResult>;
   chooseFolder: () => Promise<string | null>;
   createTask: (input: { cwd: string; prompt: string; title?: string; worktree?: boolean }) => Promise<RunTask>;
   continueTask: (id: string, prompt: string) => Promise<RunTask>;
