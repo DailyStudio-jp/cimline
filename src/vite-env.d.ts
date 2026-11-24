@@ -20,6 +20,7 @@ export interface RunTask {
   threadId: string | null;
   exitCode: number | null;
   logs: RunLog[];
+  closed: boolean;
 }
 
 export interface TokenUsage {
@@ -57,6 +58,8 @@ export interface CodexDeskApi {
   continueTask: (id: string, prompt: string) => Promise<RunTask>;
   stopTask: (id: string) => Promise<RunTask>;
   stopAll: () => Promise<boolean>;
+  closeTask: (id: string) => Promise<RunTask>;
+  reopenTask: (id: string) => Promise<RunTask>;
   deleteTask: (id: string) => Promise<boolean>;
   onTasksUpdated: (callback: (tasks: RunTask[]) => void) => () => void;
 }

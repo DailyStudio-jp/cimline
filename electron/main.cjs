@@ -8,6 +8,15 @@ const { fileURLToPath } = require("node:url");
 const tasks = new Map();
 const MAX_LOGS = 100;
 const MAX_LOG_TEXT = 8000;
+const TASK_STORE_FILE = "tasks.json";
+const TASK_SAVE_DEBOUNCE_MS = 300;
+
+let taskStorePath = null;
+let taskSaveTimer = null;
+let taskWriteChain = Promise.resolve();
+let taskPersistenceReady = false;
+let quitFlushStarted = false;
+let quitFlushComplete = false;
 
 function resolveCodexScript() {
   const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
@@ -32,11 +41,146 @@ function serializeTask(task) {
     threadId: task.threadId,
     exitCode: task.exitCode,
     logs: task.logs,
+    closed: task.closed === true,
   };
+}
+
+function normalizePersistedUsage(usage) {
+  const fields = [
+    "inputTokens",
+    "cachedInputTokens",
+    "cacheWriteInputTokens",
+    "outputTokens",
+    "reasoningOutputTokens",
+    "totalTokens",
+    "turns",
+  ];
+  const normalized = {};
+  for (const field of fields) {
+    const value = usage?.[field];
+    normalized[field] = Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  }
+  return normalized;
+}
+
+function restoreTask(record) {
+  if (!record || typeof record !== "object" || typeof record.id !== "string") return null;
+  const allowedStatuses = new Set(["running", "stopping", "completed", "failed", "stopped"]);
+  const savedStatus = allowedStatuses.has(record.status) ? record.status : "stopped";
+  const wasActive = savedStatus === "running" || savedStatus === "stopping";
+  const logs = Array.isArray(record.logs)
+    ? record.logs
+      .filter((log) => log && typeof log === "object" && typeof log.text === "string")
+      .slice(-MAX_LOGS)
+      .map((log) => ({
+        id: typeof log.id === "string" ? log.id : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        kind: typeof log.kind === "string" ? log.kind : "notice",
+        text: log.text.slice(0, MAX_LOG_TEXT),
+        at: typeof log.at === "string" ? log.at : new Date().toISOString(),
+      }))
+    : [];
+  const task = {
+    id: record.id,
+    title: typeof record.title === "string" ? record.title : "保存された依頼",
+    prompt: typeof record.prompt === "string" ? record.prompt : "",
+    cwd: typeof record.cwd === "string" ? record.cwd : "",
+    worktree: record.worktree === true,
+    usage: normalizePersistedUsage(record.usage),
+    status: wasActive ? "stopped" : savedStatus,
+    startedAt: typeof record.startedAt === "string" ? record.startedAt : new Date().toISOString(),
+    endedAt: wasActive ? new Date().toISOString() : (typeof record.endedAt === "string" ? record.endedAt : null),
+    threadId: typeof record.threadId === "string" ? record.threadId : null,
+    exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null,
+    logs,
+    closed: record.closed === true,
+    stdoutBuffer: "",
+    stderrBuffer: "",
+    stopRequested: false,
+    child: null,
+  };
+  if (wasActive) {
+    const reason = task.threadId
+      ? "アプリ終了前に実行中だったため停止しました。保存済みのCodex会話から再開できます。"
+      : "アプリ終了前に実行中だったため停止しました。Codex会話IDがないため、この依頼は続行できません。";
+    task.logs.push({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      kind: "system",
+      text: reason,
+      at: new Date().toISOString(),
+    });
+    if (task.logs.length > MAX_LOGS) task.logs.splice(0, task.logs.length - MAX_LOGS);
+  }
+  return task;
+}
+
+function scheduleTaskSave() {
+  if (!taskPersistenceReady || !taskStorePath) return;
+  if (taskSaveTimer) clearTimeout(taskSaveTimer);
+  taskSaveTimer = setTimeout(() => {
+    taskSaveTimer = null;
+    queueTaskSave();
+  }, TASK_SAVE_DEBOUNCE_MS);
+  taskSaveTimer.unref?.();
+}
+
+function queueTaskSave() {
+  if (!taskPersistenceReady || !taskStorePath) return taskWriteChain;
+  const snapshot = {
+    version: 1,
+    tasks: [...tasks.values()].map(serializeTask),
+  };
+  const content = JSON.stringify(snapshot, null, 2);
+  const write = async () => {
+    const directory = path.dirname(taskStorePath);
+    await fs.promises.mkdir(directory, { recursive: true });
+    const tempPath = `${taskStorePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    try {
+      await fs.promises.writeFile(tempPath, content, "utf8");
+      await fs.promises.rename(tempPath, taskStorePath);
+    } catch (error) {
+      await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+      throw error;
+    }
+  };
+  taskWriteChain = taskWriteChain.catch(() => {}).then(write);
+  taskWriteChain.catch((error) => console.error("タスク履歴の保存に失敗しました:", error));
+  return taskWriteChain;
+}
+
+async function flushTaskSave() {
+  if (taskSaveTimer) {
+    clearTimeout(taskSaveTimer);
+    taskSaveTimer = null;
+  }
+  await queueTaskSave();
+  await taskWriteChain;
+}
+
+function loadPersistedTasks() {
+  taskStorePath = path.join(app.getPath("userData"), TASK_STORE_FILE);
+  let recoveredActiveTask = false;
+  try {
+    const contents = fs.readFileSync(taskStorePath, "utf8");
+    const saved = JSON.parse(contents);
+    const records = Array.isArray(saved) ? saved : saved?.tasks;
+    if (Array.isArray(records)) {
+      for (const record of records) {
+        const task = restoreTask(record);
+        if (!task) continue;
+        if (record.status === "running" || record.status === "stopping") recoveredActiveTask = true;
+        tasks.set(task.id, task);
+      }
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") console.error("タスク履歴を読み込めませんでした:", error);
+  }
+  taskPersistenceReady = true;
+  if (recoveredActiveTask) scheduleTaskSave();
 }
 
 function broadcastTasks() {
   const snapshot = [...tasks.values()].map(serializeTask);
+  scheduleTaskSave();
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.webContents.send("tasks:updated", snapshot);
   }
@@ -113,7 +257,10 @@ function consumeCliEvent(task, line) {
     return;
   }
 
-  if (event.type === "thread.started" && event.thread_id) task.threadId = event.thread_id;
+  if (event.type === "thread.started" && event.thread_id) {
+    task.threadId = event.thread_id;
+    broadcastTasks();
+  }
   if (event.type === "turn.started") appendLog(task, "system", "Codex が作業を始めました");
   if (event.type === "item.started" && event.item?.type === "command_execution") {
     const command = Array.isArray(event.item.command) ? event.item.command.join(" ") : event.item.command;
@@ -331,6 +478,7 @@ function startTask(input) {
     threadId: null,
     exitCode: null,
     logs: [],
+    closed: false,
     stdoutBuffer: "",
     stderrBuffer: "",
     stopRequested: false,
@@ -376,6 +524,14 @@ function stopTask(task) {
   return serializeTask(task);
 }
 
+function setTaskClosed(taskId, closed) {
+  const task = tasks.get(String(taskId));
+  if (!task) throw new Error("実行が見つかりません。");
+  task.closed = closed;
+  broadcastTasks();
+  return serializeTask(task);
+}
+
 function registerIpc() {
   ipcMain.handle("app:get-state", () => ({
     tasks: [...tasks.values()].map(serializeTask),
@@ -407,6 +563,8 @@ function registerIpc() {
     for (const task of tasks.values()) stopTask(task);
     return true;
   });
+  ipcMain.handle("tasks:close", (_event, id) => setTaskClosed(id, true));
+  ipcMain.handle("tasks:reopen", (_event, id) => setTaskClosed(id, false));
   ipcMain.handle("tasks:delete", (_event, id) => {
     const task = tasks.get(String(id));
     if (!task) return false;
@@ -460,6 +618,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  loadPersistedTasks();
   registerIpc();
   createWindow();
   app.on("activate", () => {
@@ -467,8 +626,18 @@ app.whenReady().then(() => {
   });
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
+  if (quitFlushComplete) return;
+  event.preventDefault();
+  if (quitFlushStarted) return;
+  quitFlushStarted = true;
   for (const task of tasks.values()) stopTask(task);
+  flushTaskSave()
+    .catch((error) => console.error("終了前にタスク履歴を保存できませんでした:", error))
+    .finally(() => {
+      quitFlushComplete = true;
+      app.quit();
+    });
 });
 
 app.on("window-all-closed", () => {
