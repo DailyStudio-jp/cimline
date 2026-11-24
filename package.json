@@ -1,8 +1,8 @@
 {
-  "name": "codex-cli-run-desk",
+  "name": "cimline",
   "version": "0.1.0",
   "private": true,
-  "description": "Electron desktop dashboard for managing Codex CLI runs.",
+  "description": "CimLine desktop app for managing Codex CLI sessions.",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -k -n VITE,ELECTRON -c cyan,magenta \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on tcp:127.0.0.1:5173 && electron . --dev\"",
@@ -34,7 +34,7 @@
   },
   "build": {
     "appId": "local.codex.rundesk",
-    "productName": "Codex Run Desk",
+    "productName": "CimLine",
     "directories": {
       "output": "release"
     },

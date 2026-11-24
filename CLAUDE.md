@@ -2,7 +2,7 @@
 
 ## Project
 
-Codex Run Desk is a Windows desktop app for managing multiple Codex CLI sessions. It uses Electron, React, TypeScript, Vite, and a small set of shadcn-style UI components.
+CimLine is a Windows desktop app for managing multiple Codex CLI sessions. It uses Electron, React, TypeScript, Vite, and a small set of shadcn-style UI components.
 
 ## Structure
 
