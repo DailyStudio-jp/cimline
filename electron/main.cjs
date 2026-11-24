@@ -73,6 +73,36 @@ function extractItemText(item) {
   return item.text || "";
 }
 
+function readUsageCount(usage, snakeCaseKey, camelCaseKey) {
+  const value = usage?.[snakeCaseKey] ?? usage?.[camelCaseKey];
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function normalizeTurnUsage(usage) {
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
+
+  const inputTokens = readUsageCount(usage, "input_tokens", "inputTokens");
+  const cachedInputTokens = readUsageCount(usage, "cached_input_tokens", "cachedInputTokens");
+  const cacheWriteInputTokens = readUsageCount(usage, "cache_write_input_tokens", "cacheWriteInputTokens");
+  const outputTokens = readUsageCount(usage, "output_tokens", "outputTokens");
+  const reasoningOutputTokens = readUsageCount(usage, "reasoning_output_tokens", "reasoningOutputTokens");
+  const totalTokens = readUsageCount(usage, "total_tokens", "totalTokens");
+
+  const counts = [inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens, reasoningOutputTokens, totalTokens];
+  if (counts.every((value) => value === null) || counts.every((value) => value === null || value === 0)) {
+    return null;
+  }
+
+  return {
+    inputTokens: inputTokens ?? 0,
+    cachedInputTokens: cachedInputTokens ?? 0,
+    cacheWriteInputTokens: cacheWriteInputTokens ?? 0,
+    outputTokens: outputTokens ?? 0,
+    reasoningOutputTokens: reasoningOutputTokens ?? 0,
+    totalTokens: totalTokens ?? ((inputTokens ?? 0) + (outputTokens ?? 0)),
+  };
+}
+
 function consumeCliEvent(task, line) {
   if (!line.trim()) return;
   let event;
@@ -95,15 +125,21 @@ function consumeCliEvent(task, line) {
     if (text) appendLog(task, item.type === "agent_message" ? "assistant" : item.type === "command_execution" ? "command" : "activity", text);
   }
   if (event.type === "turn.completed") appendLog(task, "system", "この依頼の応答が完了しました");
-  if (event.type === "turn.completed" && event.usage) {
-    const usage = event.usage;
-    task.usage.inputTokens += Number(usage.input_tokens || 0);
-    task.usage.cachedInputTokens += Number(usage.cached_input_tokens || 0);
-    task.usage.cacheWriteInputTokens += Number(usage.cache_write_input_tokens || 0);
-    task.usage.outputTokens += Number(usage.output_tokens || 0);
-    task.usage.reasoningOutputTokens += Number(usage.reasoning_output_tokens || 0);
-    task.usage.totalTokens = task.usage.inputTokens + task.usage.outputTokens;
+  if (event.type === "turn.completed") {
     task.usage.turns += 1;
+    const usage = normalizeTurnUsage(event.usage);
+    if (usage) {
+      // Codex exec --json reports the thread's accumulated usage in turn.completed.
+      // Assign the reported snapshot so resumed turns do not count earlier turns twice.
+      task.usage.inputTokens = usage.inputTokens;
+      task.usage.cachedInputTokens = usage.cachedInputTokens;
+      task.usage.cacheWriteInputTokens = usage.cacheWriteInputTokens;
+      task.usage.outputTokens = usage.outputTokens;
+      task.usage.reasoningOutputTokens = usage.reasoningOutputTokens;
+      task.usage.totalTokens = usage.totalTokens;
+    } else {
+      appendLog(task, "notice", "Codex CLI の完了イベントにトークン数が含まれていません");
+    }
     broadcastTasks();
   }
   if (event.type === "turn.failed" || event.type === "error") {
