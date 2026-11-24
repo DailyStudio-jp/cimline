@@ -320,7 +320,11 @@ export default function App() {
   });
   const visibleTasks = filteredTasks.filter((task) => !task.closed);
 
-  const rateWindows = rateLimits ? [rateLimits.primary, rateLimits.secondary].filter((window): window is NonNullable<typeof window> => Boolean(window)) : [];
+  const rateWindows = rateLimits
+    ? [rateLimits.primary, rateLimits.secondary]
+        .filter((window): window is NonNullable<typeof window> => Boolean(window))
+        .sort((left, right) => (left.windowDurationMins ?? Number.MAX_SAFE_INTEGER) - (right.windowDurationMins ?? Number.MAX_SAFE_INTEGER))
+    : [];
 
   function notify(message: string, error = false) {
     setToast({ message, error });
@@ -998,6 +1002,21 @@ export default function App() {
       >
         <Card className="dialog-card usage-dialog-card"><CardContent className="usage-content">
           <div className="dialog-heading"><div><h2 id="usage-dialog-title">使用量</h2></div><div className="usage-heading-actions"><Button variant="ghost" size="icon-sm" aria-label="利用枠を更新" title="利用枠を更新" onClick={openUsage} disabled={rateLimitsLoading}><RefreshCw size={15} className={rateLimitsLoading ? "spin" : ""} /></Button><Button variant="ghost" size="icon-sm" aria-label="閉じる" onClick={() => setUsageOpen(false)}><X size={16} /></Button></div></div>
+          <section className="remaining-section">
+            <div className="usage-section-heading"><h3>アカウント利用枠</h3><span>Codexアカウント</span></div>
+            {rateLimitsLoading && !rateLimits ? <div className="usage-empty">利用枠を取得しています…</div> : rateWindows.length ? <div className="rate-window-list">{rateWindows.map((window, index) => {
+              const used = Math.max(0, Math.min(100, window.usedPercent));
+              const resetAt = resetTimeLabel(window.resetsAt);
+              const intensity = used >= 90 ? " is-critical" : used >= 70 ? " is-warning" : "";
+              return <div className={`rate-window${intensity}`} key={`${window.windowDurationMins || "limit"}-${index}`}>
+                <div className="rate-window-heading"><span>{rateWindowLabel(window.windowDurationMins)}</span><strong>{Math.round(used)}% <small>使用済み</small></strong></div>
+                <div className="rate-window-track"><span style={{ width: `${used}%` }} /></div>
+                <small className="rate-window-reset">{resetAt ? `リセット ${resetAt}` : "リセット時刻を取得できません"}</small>
+              </div>;
+            })}</div> : <div className="usage-empty">{rateLimitsError ? "利用枠を取得できませんでした。更新してください。" : "利用枠の情報はありません。"}</div>}
+            <p className="usage-footnote">Codexアカウントから取得した利用枠の消費割合です。</p>
+          </section>
+          <Separator className="usage-separator" />
           <section className="terminal-usage-section">
             <div className="usage-section-heading"><h3>ターミナル別トークン使用量</h3><span>{sortedTasks.length}件</span></div>
             <div className="terminal-usage-list">
@@ -1009,19 +1028,6 @@ export default function App() {
                 <div className="terminal-usage-breakdown"><span><small>入力</small><strong>{numberLabel(task.usage?.inputTokens || 0)}</strong><em>tokens</em></span><span><small>出力</small><strong>{numberLabel(task.usage?.outputTokens || 0)}</strong><em>tokens</em></span></div>
               </article>) : <div className="usage-empty">ターミナルがありません。</div>}
             </div>
-          </section>
-          <section className="remaining-section">
-            <div className="usage-section-heading"><h3>利用枠の残り</h3><span>Codexアカウント</span></div>
-            {rateLimitsLoading && !rateLimits ? <div className="usage-empty">利用枠を取得しています…</div> : rateWindows.length ? <div className="rate-window-list">{rateWindows.map((window, index) => {
-              const remaining = Math.max(0, Math.min(100, 100 - window.usedPercent));
-              const resetAt = resetTimeLabel(window.resetsAt);
-              return <div className="rate-window" key={`${window.windowDurationMins || "limit"}-${index}`}>
-                <div className="rate-window-heading"><span>{rateWindowLabel(window.windowDurationMins)}</span><strong>{Math.round(remaining)}% <small>残り</small></strong></div>
-                <div className="rate-window-track"><span style={{ width: `${remaining}%` }} /></div>
-                {resetAt && <small className="rate-window-reset">リセット {resetAt}</small>}
-              </div>;
-            })}</div> : <div className="usage-empty">{rateLimitsError ? "利用枠を取得できませんでした。更新してください。" : "利用枠の情報はありません。"}</div>}
-            <p className="usage-footnote">Codexが返すアカウント利用枠の残り割合です。</p>
           </section>
           <Separator className="usage-separator" />
           <div className="usage-panel-heading"><div><h3>トークン使用量</h3></div><span className="usage-live-tag"><CircleDot size={10} /> このアプリ</span></div>

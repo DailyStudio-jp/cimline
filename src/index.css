@@ -234,6 +234,10 @@ body { font-size: 15px; }
 .rate-window-heading strong small { color: #9da18f; font: 11px var(--font-sans); }
 .rate-window-track { height: 7px; overflow: hidden; margin-top: 10px; border-radius: 8px; background: #2c2e27; }
 .rate-window-track > span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #91b958, #c8f36c); }
+.rate-window.is-warning .rate-window-heading strong { color: #e8c76a; }
+.rate-window.is-warning .rate-window-track > span { background: linear-gradient(90deg, #c4993c, #edcf68); }
+.rate-window.is-critical .rate-window-heading strong { color: #ed8e7e; }
+.rate-window.is-critical .rate-window-track > span { background: linear-gradient(90deg, #bf5e50, #ec8e7e); }
 .rate-window-reset { display: block; margin-top: 8px; color: #86897d; font-size: 11px; }
 .remaining-section .usage-footnote { margin-top: 12px; padding: 0; border: 0; color: #818478; font-size: 11px; }
 .usage-empty { font-size: 12px; }
