@@ -1688,6 +1688,9 @@ function isAppUrl(url) {
 }
 
 function createWindow() {
+  const icon = !app.isPackaged && process.argv.includes("--dev")
+    ? path.join(__dirname, "../public/dailystudio-favicon.png")
+    : path.join(app.getAppPath(), "dist", "dailystudio-favicon.png");
   const window = new BrowserWindow({
     width: 1480,
     height: 960,
@@ -1695,6 +1698,7 @@ function createWindow() {
     minHeight: 700,
     backgroundColor: "#11120f",
     title: "CimLine",
+    icon,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,

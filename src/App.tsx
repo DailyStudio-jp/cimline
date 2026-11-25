@@ -598,7 +598,12 @@ export default function App() {
               {!query && !showUnreviewedOnly && <button type="button" onClick={() => openComposer()}><Plus size={15} />新しいターミナル</button>}
             </section>
           ) : (
-            <section className="empty-workspace"><LoaderCircle size={20} className="spin" /><span>ターミナルを読み込んでいます…</span></section>
+            <section className="startup-screen" role="status" aria-live="polite">
+              <img className="startup-logo" src="./dailystudio-logo.webp" alt="デイリースタジオ" />
+              <h1>CimLine</h1>
+              <p>CLI WORKSPACE</p>
+              <div className="startup-loading"><LoaderCircle size={16} className="spin" /><span>ターミナルを準備しています…</span></div>
+            </section>
           )}
         </main>
       </div>
