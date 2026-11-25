@@ -3,6 +3,7 @@ import { Terminal as TerminalIcon, X } from "lucide-react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { buildImagePastePayloads, flushQueuedImagePastePayloads, isSupportedImageName, MAX_DROPPED_IMAGES, pasteOrQueueImagePayloads, shouldClearImageDropOverlay } from "@/image-drop.mjs";
 import type { CimLineSession } from "@/vite-env";
 
 export type TerminalSession = CimLineSession;
@@ -38,26 +39,16 @@ function getBridge(): PtyBridge {
   return (window.codexDesk || {}) as unknown as PtyBridge;
 }
 
-const imageFilePattern = /\.(png|jpe?g|gif|webp|bmp|tiff?|heic|heif)$/i;
-
 function hasFileItems(event: ReactDragEvent<HTMLElement>) {
   return Array.from(event.dataTransfer.items).some((item) => item.kind === "file")
     || Array.from(event.dataTransfer.types).includes("Files");
-}
-
-function isSupportedImage(file: File) {
-  return imageFilePattern.test(file.name);
-}
-
-function formatDroppedPath(filePath: string, platform?: string) {
-  if (platform === "win32") return `"${filePath.replace(/"/g, "\\\"")}"`;
-  return "'" + filePath.replace(/'/g, "'\\''") + "'";
 }
 
 function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, dropTarget, onClose, onFocus, onDragStart, onDragOver, onDrop, onError }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const pendingImagePastePayloadsRef = useRef<string[]>([]);
   const [imageDropActive, setImageDropActive] = useState(false);
 
   useEffect(() => {
@@ -128,6 +119,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, 
       }
       void bridge.writePty(session.id, data).catch((error) => onError("入力を送信できません: " + String(error)));
     });
+    flushQueuedImagePastePayloads(pendingImagePastePayloadsRef.current, terminal);
     const resizeDisposable = terminal.onResize(({ cols, rows }) => {
       if (typeof bridge.resizePty === "function") void bridge.resizePty(session.id, cols, rows).catch(() => {});
     });
@@ -246,9 +238,9 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, 
     event.preventDefault();
     event.stopPropagation();
     setImageDropActive(false);
-    const files = Array.from(event.dataTransfer.files).filter(isSupportedImage).slice(0, 10);
+    const files = Array.from(event.dataTransfer.files).filter((file) => isSupportedImageName(file.name)).slice(0, MAX_DROPPED_IMAGES);
     if (!files.length) {
-      onError("PNG、JPEG、GIF、WebP、BMP、TIFF、HEICの画像をドロップしてください。");
+      onError("PNG、JPEG、GIF、WebPの画像をドロップしてください。");
       return;
     }
     const bridge = getBridge();
@@ -256,24 +248,21 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, 
       onError("画像ドロップAPIがありません。CimLineを完全終了して再起動してください。");
       return;
     }
-    let paths: string[];
+    let paths: unknown;
     try {
       paths = bridge.getDroppedImagePaths(files);
     } catch (error) {
       onError("画像パスを取得できません: " + String(error));
       return;
     }
-    if (!paths.length) {
+    const pastePayloads = buildImagePastePayloads(paths, bridge.platform);
+    if (!pastePayloads.length) {
       onError("ドロップした画像のパスを取得できませんでした。");
       return;
     }
     const terminal = terminalRef.current;
-    if (!terminal) return;
-    paths.forEach((filePath, index) => {
-      const separator = index > 0 ? " " : "";
-      terminal.paste(separator + formatDroppedPath(filePath, bridge.platform));
-    });
-    terminal.focus();
+    const notQueuedCount = pasteOrQueueImagePayloads(pendingImagePastePayloadsRef.current, terminal, pastePayloads);
+    if (notQueuedCount) onError(`${notQueuedCount}枚はターミナル準備前の上限を超えたため、もう一度ドロップしてください。`);
     onFocus(session.id);
   };
 
@@ -300,10 +289,12 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, 
         setImageDropActive(true);
       }}
       onDragLeave={(event) => {
-        if (!hasFileItems(event)) return;
+        if (!imageDropActive) return;
         event.preventDefault();
         event.stopPropagation();
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setImageDropActive(false);
+        const relatedTarget = event.relatedTarget;
+        const relatedTargetInsidePane = relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget);
+        if (shouldClearImageDropOverlay(imageDropActive, relatedTargetInsidePane)) setImageDropActive(false);
       }}
       onDrop={(event) => {
         if (!hasFileItems(event)) {

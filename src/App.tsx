@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { TerminalPane, type TerminalSession } from "@/components/TerminalPane";
+import { countReviewFilterResults, filterActiveSessions, isUnreviewedTerminal, nextReviewingSessionIdAfterReopen, retainReviewingSessionId } from "@/session-filter.mjs";
 import type { SessionStatus } from "@/vite-env";
 import { Separator } from "@/components/ui/separator";
 
@@ -124,10 +125,6 @@ function sessionStatusLabel(status: SessionStatus) {
   }
 }
 
-function isUnreviewedTerminal(session: TerminalSession | undefined): boolean {
-  return Boolean(session?.unreviewed && (session.status === "completed" || session.status === "approval"));
-}
-
 function statusAgeLabel(statusAt: string | null, now: number) {
   if (!statusAt) return "";
   const timestamp = Date.parse(statusAt);
@@ -179,6 +176,12 @@ export default function App() {
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
 
+  const clearReviewingSession = useCallback((sessionId?: string) => {
+    if (sessionId && reviewingSessionIdRef.current !== sessionId) return;
+    reviewingSessionIdRef.current = null;
+    setReviewingSessionId(null);
+  }, []);
+
   const notify = useCallback((message: string, error = false) => {
     setToast({ message, error });
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -193,21 +196,17 @@ export default function App() {
       reviewingSessionIdRef.current = sessionId;
       setReviewingSessionId(sessionId);
     } else {
-      reviewingSessionIdRef.current = null;
-      setReviewingSessionId(null);
+      clearReviewingSession();
     }
     setSessions((current) => current.some((item) => item.id === sessionId && item.unreviewed)
       ? current.map((item) => item.id === sessionId ? { ...item, unreviewed: false } : item)
       : current);
     const api = bridge();
     if (typeof api.setFocusedSession === "function") void api.setFocusedSession(sessionId).catch(() => {});
-  }, [showUnreviewedOnly]);
+  }, [clearReviewingSession, showUnreviewedOnly]);
 
   const toggleUnreviewedOnly = () => {
-    if (showUnreviewedOnly) {
-      reviewingSessionIdRef.current = null;
-      setReviewingSessionId(null);
-    }
+    if (showUnreviewedOnly) clearReviewingSession();
     setShowUnreviewedOnly(!showUnreviewedOnly);
   };
 
@@ -261,6 +260,14 @@ export default function App() {
       if (toastTimer.current) clearTimeout(toastTimer.current);
     };
   }, []);
+
+  useEffect(() => {
+    const retainedId = retainReviewingSessionId(sessions, reviewingSessionIdRef.current);
+    if (retainedId !== reviewingSessionIdRef.current) {
+      reviewingSessionIdRef.current = retainedId;
+      setReviewingSessionId(retainedId);
+    }
+  }, [sessions]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setStatusClock(Date.now()), 30_000);
@@ -319,14 +326,9 @@ export default function App() {
   }, [sessions, sessionOrder]);
 
   const query = search.trim().toLowerCase();
-  const matchesSearch = (session: TerminalSession) =>
-    !query || [session.title, session.cwd, cliName(session.cli)].some((value) => value.toLowerCase().includes(query));
-  const reviewFilterCount = sortedActiveSessions.filter((session) => matchesSearch(session)
-    && (isUnreviewedTerminal(session) || (showUnreviewedOnly && session.id === reviewingSessionId))).length;
-  const filteredActiveSessions = sortedActiveSessions.filter((session) =>
-    (!showUnreviewedOnly || isUnreviewedTerminal(session) || session.id === reviewingSessionId)
-      && matchesSearch(session)
-  );
+  const filterOptions = { query, showUnreviewedOnly, reviewingSessionId };
+  const reviewFilterCount = countReviewFilterResults(sortedActiveSessions, filterOptions);
+  const filteredActiveSessions = filterActiveSessions(sortedActiveSessions, filterOptions);
   const historySessions = useMemo(() => sessions
     .filter((session) => session.closed)
     .filter((session) => !query || [session.title, session.cwd, cliName(session.cli)].some((value) => value.toLowerCase().includes(query)))
@@ -399,6 +401,7 @@ export default function App() {
     }
     try {
       await api.closeSession(sessionId);
+      clearReviewingSession(sessionId);
       setSessions((current) => current.map((session) => session.id === sessionId
         ? { ...session, closed: true, status: "exited", statusAt: new Date().toISOString(), unreviewed: false }
         : session));
@@ -411,7 +414,7 @@ export default function App() {
     } catch (error) {
       notify("ターミナルを閉じられません: " + errorText(error), true);
     }
-  }, [notify]);
+  }, [clearReviewingSession, notify]);
 
   async function reopenSession(sessionId: string) {
     const api = bridge();
@@ -423,6 +426,11 @@ export default function App() {
     try {
       const session = normalizeSessions([await api.reopenSession(sessionId)])[0];
       if (!session) throw new Error("ターミナル情報を読み取れませんでした。");
+      const nextReviewingId = nextReviewingSessionIdAfterReopen(session.id, reviewingSessionIdRef.current);
+      if (nextReviewingId !== reviewingSessionIdRef.current) {
+        reviewingSessionIdRef.current = nextReviewingId;
+        setReviewingSessionId(nextReviewingId);
+      }
       setSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
       setSessionOrder((current) => [session.id, ...current.filter((id) => id !== session.id)]);
       focusSession(session.id);
@@ -444,6 +452,7 @@ export default function App() {
     }
     try {
       await api.deleteSession(sessionId);
+      clearReviewingSession(sessionId);
       setSessions((current) => current.filter((item) => item.id !== sessionId));
       setSessionOrder((current) => current.filter((id) => id !== sessionId));
     } catch (error) {

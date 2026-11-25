@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
-const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp|tiff?|heic|heif)$/i;
+const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp)$/i;
 
 function getDroppedImagePaths(files) {
   if (!Array.isArray(files)) return [];
