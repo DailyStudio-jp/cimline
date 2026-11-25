@@ -124,6 +124,10 @@ function sessionStatusLabel(status: SessionStatus) {
   }
 }
 
+function isUnreviewedTerminal(session: TerminalSession | undefined): boolean {
+  return Boolean(session?.unreviewed && (session.status === "completed" || session.status === "approval"));
+}
+
 function statusAgeLabel(statusAt: string | null, now: number) {
   if (!statusAt) return "";
   const timestamp = Date.parse(statusAt);
@@ -143,9 +147,11 @@ export default function App() {
   const [recentFolders, setRecentFolders] = useState<RecentFolder[]>(loadRecentFolders);
   const [sessionOrder, setSessionOrder] = useState<string[]>(() => readJson<string[]>(sessionOrderStorageKey, []));
   const [search, setSearch] = useState("");
+  const [showUnreviewedOnly, setShowUnreviewedOnly] = useState(false);
   const [folderPath, setFolderPath] = useState("");
   const [selectedCli, setSelectedCli] = useState<CliKind>(() => localStorage.getItem(lastCliStorageKey) === "claude" ? "claude" : "codex");
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
+  const [reviewingSessionId, setReviewingSessionId] = useState<string | null>(null);
   const [statusClock, setStatusClock] = useState(() => Date.now());
   const [composerOpen, setComposerOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
@@ -169,6 +175,9 @@ export default function App() {
   const usageRef = useRef<HTMLDialogElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusedSessionIdRef = useRef<string | null>(null);
+  const reviewingSessionIdRef = useRef<string | null>(null);
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
 
   const notify = useCallback((message: string, error = false) => {
     setToast({ message, error });
@@ -179,12 +188,28 @@ export default function App() {
   const focusSession = useCallback((sessionId: string) => {
     focusedSessionIdRef.current = sessionId;
     setFocusedSessionId(sessionId);
-    setSessions((current) => current.some((session) => session.id === sessionId && session.unreviewed)
-      ? current.map((session) => session.id === sessionId ? { ...session, unreviewed: false } : session)
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (showUnreviewedOnly && (isUnreviewedTerminal(session) || reviewingSessionIdRef.current === sessionId)) {
+      reviewingSessionIdRef.current = sessionId;
+      setReviewingSessionId(sessionId);
+    } else {
+      reviewingSessionIdRef.current = null;
+      setReviewingSessionId(null);
+    }
+    setSessions((current) => current.some((item) => item.id === sessionId && item.unreviewed)
+      ? current.map((item) => item.id === sessionId ? { ...item, unreviewed: false } : item)
       : current);
     const api = bridge();
     if (typeof api.setFocusedSession === "function") void api.setFocusedSession(sessionId).catch(() => {});
-  }, []);
+  }, [showUnreviewedOnly]);
+
+  const toggleUnreviewedOnly = () => {
+    if (showUnreviewedOnly) {
+      reviewingSessionIdRef.current = null;
+      setReviewingSessionId(null);
+    }
+    setShowUnreviewedOnly(!showUnreviewedOnly);
+  };
 
   const refreshUsage = useCallback(async () => {
     const api = bridge();
@@ -294,8 +319,13 @@ export default function App() {
   }, [sessions, sessionOrder]);
 
   const query = search.trim().toLowerCase();
+  const matchesSearch = (session: TerminalSession) =>
+    !query || [session.title, session.cwd, cliName(session.cli)].some((value) => value.toLowerCase().includes(query));
+  const reviewFilterCount = sortedActiveSessions.filter((session) => matchesSearch(session)
+    && (isUnreviewedTerminal(session) || (showUnreviewedOnly && session.id === reviewingSessionId))).length;
   const filteredActiveSessions = sortedActiveSessions.filter((session) =>
-    !query || [session.title, session.cwd, cliName(session.cli)].some((value) => value.toLowerCase().includes(query))
+    (!showUnreviewedOnly || isUnreviewedTerminal(session) || session.id === reviewingSessionId)
+      && matchesSearch(session)
   );
   const historySessions = useMemo(() => sessions
     .filter((session) => session.closed)
@@ -538,6 +568,18 @@ export default function App() {
         <header className="topbar">
           <div className="topbar-left">
             <label className="search-box"><Search size={14} /><input ref={searchRef} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ターミナルを検索" aria-label="ターミナルを検索" /><kbd>/</kbd></label>
+            <button
+              className={"review-filter" + (showUnreviewedOnly ? " is-active" : "")}
+              type="button"
+              aria-label={`未確認のターミナルだけを表示（${reviewFilterCount}件）`}
+              aria-pressed={showUnreviewedOnly}
+              title={(showUnreviewedOnly ? "未確認のみ表示中" : "未確認のみ表示") + `（${reviewFilterCount}件）`}
+              onClick={toggleUnreviewedOnly}
+            >
+              <CircleDot size={14} aria-hidden="true" />
+              <span className="review-filter-label">未確認のみ</span>
+              <span className="review-filter-count" aria-hidden="true">{reviewFilterCount}</span>
+            </button>
           </div>
           <div className="topbar-right">
             <span className="connection-badge"><span className="connection-dot" />ローカル接続</span>
@@ -569,9 +611,9 @@ export default function App() {
           ) : sessionsInitialized ? (
             <section className="empty-workspace">
               <div className="empty-terminal-icon"><TerminalIcon size={25} /></div>
-              <h1>{query ? "一致するターミナルがありません" : historySessions.length ? "開いているターミナルはありません" : "ターミナルを作成"}</h1>
-              <p>{query ? "検索語を変えてください。" : "フォルダーとCLIを選ぶと、すぐに対話できるターミナルが開きます。"}</p>
-              {!query && <button type="button" onClick={() => openComposer()}><Plus size={15} />新しいターミナル</button>}
+              <h1>{query ? "一致するターミナルがありません" : showUnreviewedOnly ? "未確認のターミナルはありません" : historySessions.length ? "開いているターミナルはありません" : "ターミナルを作成"}</h1>
+              <p>{query ? showUnreviewedOnly ? "検索語か未確認フィルターを変えてください。" : "検索語を変えてください。" : showUnreviewedOnly ? "未確認のターミナルが追加されると、ここに表示されます。" : "フォルダーとCLIを選ぶと、すぐに対話できるターミナルが開きます。"}</p>
+              {!query && !showUnreviewedOnly && <button type="button" onClick={() => openComposer()}><Plus size={15} />新しいターミナル</button>}
             </section>
           ) : (
             <section className="empty-workspace"><LoaderCircle size={20} className="spin" /><span>ターミナルを読み込んでいます…</span></section>
