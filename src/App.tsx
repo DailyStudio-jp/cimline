@@ -5,6 +5,8 @@ import {
   Check,
   CircleDot,
   Code2,
+  ChevronLeft,
+  ChevronRight,
   Folder,
   FolderOpen,
   LoaderCircle,
@@ -40,6 +42,7 @@ type RecentFolder = { path: string; name: string };
 const recentFolderStorageKey = "cimline-recent-folders";
 const sessionOrderStorageKey = "cimline-session-order";
 const lastCliStorageKey = "cimline-last-cli";
+const sidebarCollapsedStorageKey = "cimline-sidebar-collapsed";
 
 function bridge(): CimLineBridge {
   return (window.codexDesk || {}) as unknown as CimLineBridge;
@@ -140,6 +143,7 @@ export default function App() {
   const [defaultDirectory, setDefaultDirectory] = useState("");
   const [recentFolders, setRecentFolders] = useState<RecentFolder[]>(loadRecentFolders);
   const [sessionOrder, setSessionOrder] = useState<string[]>(() => readJson<string[]>(sessionOrderStorageKey, []));
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readJson<boolean>(sidebarCollapsedStorageKey, false));
   const [search, setSearch] = useState("");
   const [showUnreviewedOnly, setShowUnreviewedOnly] = useState(false);
   const [folderPath, setFolderPath] = useState("");
@@ -482,14 +486,26 @@ export default function App() {
     void refreshUsage();
   }
 
+  function toggleSidebar() {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    localStorage.setItem(sidebarCollapsedStorageKey, JSON.stringify(next));
+  }
+
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand-lockup"><div className="brand-mark"><span /></div><div><strong>CimLine</strong><small>CLI WORKSPACE</small></div></div>
-        <button className="sidebar-new" type="button" onClick={() => openComposer()}><Plus size={17} /><span>新しいターミナル</span><kbd>Ctrl N</kbd></button>
+    <div className={"app-shell" + (sidebarCollapsed ? " is-sidebar-collapsed" : "")}>
+      <aside className="sidebar" id="primary-sidebar">
+        <div className="brand-lockup">
+          <div className="brand-mark"><span /></div>
+          <div className="brand-copy"><strong>CimLine</strong><small>CLI WORKSPACE</small></div>
+          <button className="sidebar-toggle" type="button" onClick={toggleSidebar} aria-controls="primary-sidebar" aria-expanded={!sidebarCollapsed} aria-label={sidebarCollapsed ? "サイドバーを展開" : "サイドバーを収納"} title={sidebarCollapsed ? "サイドバーを展開" : "サイドバーを収納"}>
+            {sidebarCollapsed ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
+          </button>
+        </div>
+        <button className="sidebar-new" type="button" onClick={() => openComposer()} aria-label="新しいターミナル" title="新しいターミナル"><Plus size={17} /><span>新しいターミナル</span><kbd>Ctrl N</kbd></button>
         <nav className="sidebar-nav" aria-label="メインメニュー">
-          <button className="sidebar-nav-item is-active" type="button"><TerminalIcon size={16} /><span>ターミナル</span><span className="nav-count">{sessions.filter((session) => !session.closed).length}</span></button>
-          <button className="sidebar-nav-item" type="button" onClick={showUsage}><Activity size={15} /><span>使用量</span></button>
+          <button className="sidebar-nav-item is-active" type="button" aria-label="ターミナル" title="ターミナル"><TerminalIcon size={16} /><span>ターミナル</span><span className="nav-count">{sessions.filter((session) => !session.closed).length}</span></button>
+          <button className="sidebar-nav-item" type="button" onClick={showUsage} aria-label="使用量" title="使用量"><Activity size={15} /><span>使用量</span></button>
         </nav>
         <Separator className="sidebar-separator" />
         <div className="sidebar-scroll">
