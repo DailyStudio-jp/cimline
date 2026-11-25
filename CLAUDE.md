@@ -2,39 +2,46 @@
 
 ## Project
 
-CimLine is a Windows desktop app for managing multiple Codex CLI sessions. It uses Electron, React, TypeScript, Vite, and a small set of shadcn-style UI components.
+CimLine is an Electron desktop workspace for real Claude Code and Codex CLI sessions on Windows and macOS. Each terminal is an xterm.js frontend connected to a `node-pty` shell running in the Electron main process.
 
 ## Structure
 
-- `electron/main.cjs`: starts and manages Codex CLI processes, task state, and Electron IPC handlers.
-- `electron/preload.cjs`: exposes the narrow, typed desktop API to the renderer.
-- `src/App.tsx`: terminal dashboard, task dialogs, and user interactions.
-- `src/index.css`: application layout, terminal styling, and responsive behavior.
-- `src/components/ui/`: reusable UI primitives.
+- `electron/main.cjs`: starts shells and CLI sessions, owns PTYs, persists session metadata, and handles Electron IPC.
+- `electron/preload.cjs`: exposes the narrow desktop API to the renderer.
+- `src/App.tsx`: dashboard, folder and CLI selection, session history, usage and skills dialogs.
+- `src/components/TerminalPane.tsx`: xterm lifecycle, input/output, resize, and clipboard behavior.
+- `src/index.css`: dashboard and terminal styling.
 
-The renderer must use `window.codexDesk` for desktop operations. Keep filesystem and process access in the Electron main process; do not enable renderer Node integration.
+Keep filesystem and process access in Electron main. Do not enable renderer Node integration. Validate all IPC inputs and keep terminal access scoped to session IDs.
 
 ## Development
 
-Install dependencies and start the desktop app:
-
-```powershell
+```sh
 npm install
 npm run dev
 ```
 
-Create the Windows installer with:
+`npm run build` runs the TypeScript check and Vite production build. Windows and macOS installers use `npm run package:win` and `npm run package:mac`. `node-pty` is native; preserve its Electron rebuild and archive unpack settings.
 
-```powershell
-npm run package:win
-```
+## Terminal behavior
 
-The app expects an installed and authenticated Codex CLI. It looks for the global npm installation by default; `CODEX_CLI_JS` and `CODEX_NODE_EXE` can override the CLI script and Node executable.
+- Windows shells default to `pwsh`, then `powershell.exe`; macOS uses the login shell and falls back to `/bin/zsh`.
+- A pane starts either `codex` or `claude` in its selected folder. Reopening history uses `codex resume --last` or `claude --continue`.
+- Closing a pane stops its process tree, but retains its folder, CLI, and metadata in session history.
+- The terminal UI must remain directly interactive. Do not replace it with a log viewer or a separate follow-up prompt form.
+- Use xterm's resize events to size the PTY. Keep each session's in-memory replay buffer bounded to 512 KB and sequence output to avoid duplicate writes when a pane attaches.
+- Respect terminal keyboard behavior: Ctrl+C interrupts unless text is selected; copy, paste, and right-click behavior follow the platform conventions documented in README.
+- Keep pane status in main-process session metadata. Persist only the status, timestamp, and unread flag alongside the existing session metadata; never persist the PTY buffer, prompts, or CLI output.
+- Generate Claude hooks and Codex `notify` overrides per CimLine session. Store generated config under Electron `userData`, pass it only to that CLI run, and do not modify global Claude or Codex configuration files. Send only session ID and event name through the random-port loopback notifier; drain hook stdin without retaining it.
+- Unreviewed completion is highlighted in green and permission-waiting in amber. Focusing the pane clears its unread flag and updates the OS badge. Send OS notifications only while the app is in the background.
 
-## Contribution rules
+## Codex features
 
-- Read and follow `AGENTS.md`; it contains the repository's mandatory workflow and safety rules.
-- Keep changes within the feature's scope and preserve per-terminal conversation behavior.
-- Do not commit API keys, tokens, credentials, or local Codex configuration. Keep real secrets out of source and documentation.
-- Do not add or run tests, or run a build, unless the user explicitly asks.
-- Use focused commits for independent features when preparing changes for the remote repository.
+Keep account usage (5-hour and weekly windows) and the local Skills view. Codex CLI owns interactive slash commands, plugins, and `$` skill calls inside its terminal. Do not implement CimLine-specific prompt completions inside the raw PTY input stream.
+
+## Safety and contribution rules
+
+- Read and follow `AGENTS.md`.
+- Never write API keys, tokens, credentials, or local Codex configuration into source, logs, or commits.
+- Keep `contextIsolation` enabled, `nodeIntegration` disabled, and the sandboxed preload API narrow.
+- Use separate commits for independent features when publishing changes. Do not force-push.

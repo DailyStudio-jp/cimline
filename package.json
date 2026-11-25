@@ -8,12 +8,17 @@
     "dev": "concurrently -k -n VITE,ELECTRON -c cyan,magenta \"vite --host 127.0.0.1 --port 5173 --strictPort\" \"wait-on tcp:127.0.0.1:5173 && electron . --dev\"",
     "build": "tsc -p tsconfig.app.json && vite build",
     "start": "electron .",
-    "package:win": "npm run build && electron-builder --win nsis"
+    "package:win": "npm run build && electron-builder --win nsis",
+    "package:mac": "npm run build && electron-builder --mac dmg",
+    "rebuild:native": "npm rebuild node-pty"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.79.0",
+    "node-pty": "^1.1.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tailwind-merge": "^3.4.0"
@@ -35,6 +40,10 @@
   "build": {
     "appId": "local.codex.rundesk",
     "productName": "CimLine",
+    "npmRebuild": false,
+    "asarUnpack": [
+      "node_modules/node-pty/**/*"
+    ],
     "directories": {
       "output": "release"
     },
@@ -44,12 +53,21 @@
       "package.json"
     ],
     "win": {
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true
+    },
+    "mac": {
+      "target": ["dmg"],
+      "category": "public.app-category.developer-tools"
     }
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true
   }
 }

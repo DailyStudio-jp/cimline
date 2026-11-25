@@ -1,17 +1,23 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
-const { spawn, execFile } = require("node:child_process");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, Notification, shell } = require("electron");
+const { spawn, execFile, execFileSync } = require("node:child_process");
 const fs = require("node:fs");
+const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
+const { randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { fileURLToPath } = require("node:url");
+const pty = require("node-pty");
 
-const tasks = new Map();
-const MAX_LOGS = 100;
-const MAX_LOG_TEXT = 8000;
-const TASK_STORE_FILE = "tasks.json";
-const TASK_SAVE_DEBOUNCE_MS = 300;
-const APP_SERVER_REQUEST_TIMEOUT_MS = 30000;
-const APP_SERVER_INTERRUPT_TIMEOUT_MS = 5000;
+const sessions = new Map();
+const livePtys = new Map();
+const SESSION_STORE_FILE = "sessions.json";
+const MAX_SESSIONS = 2000;
+const MAX_PTY_BUFFER_BYTES = 512 * 1024;
+const MAX_PTY_WRITE_CHARS = 1024 * 1024;
+const MAX_CLIPBOARD_CHARS = 1024 * 1024;
+const SESSION_SAVE_DEBOUNCE_MS = 300;
+const SESSION_READ_LIMIT_BYTES = 8 * 1024 * 1024;
+const DEV_SERVER_URL = process.env.CIMLINE_DEV_SERVER_URL || "http://127.0.0.1:5173";
 const MAX_SKILL_PROJECT_PATHS = 24;
 const MAX_SKILL_PATH_CHARS = 4096;
 const MAX_SKILL_ENTRIES_PER_ROOT = 1000;
@@ -33,218 +39,340 @@ const MAX_PLUGIN_MANIFEST_BYTES = 16 * 1024;
 const MAX_PLUGIN_SKILL_PATHS = 20;
 const MAX_PLUGIN_SKILL_ROOTS = 1000;
 const MAX_PLUGIN_SKILL_PATH_DEPTH = 12;
+const MAX_RATE_LIMIT_STDERR_CHARS = 1536;
+const MAX_RATE_LIMIT_STDERR_BUFFER_CHARS = 4096;
+const MAX_RATE_LIMIT_ERROR_CHARS = 2048;
+const MAX_NOTIFY_BODY_BYTES = 8 * 1024;
+const MAX_INPUT_LINE_CHARS = 16 * 1024;
+const SESSION_STATUSES = new Set(["idle", "running", "completed", "approval", "exited"]);
+const NOTIFY_EVENTS = new Set(["idle", "running", "completed", "approval"]);
+const NOTIFY_ENDPOINT = "/notify";
 
-let taskStorePath = null;
-let taskSaveTimer = null;
-let taskWriteChain = Promise.resolve();
-let taskPersistenceReady = false;
+let sessionStorePath = null;
+let notifyServer = null;
+let notifyToken = null;
+let notifyUrl = null;
+let focusedSessionId = null;
+let sessionSaveTimer = null;
+let sessionWriteChain = Promise.resolve();
+let sessionPersistenceReady = false;
 let quitFlushStarted = false;
 let quitFlushComplete = false;
 let codexStartupQueue = Promise.resolve();
 
-function resolveCodexScript() {
-  const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
-  const candidates = [
-    process.env.CODEX_CLI_JS,
-    path.join(appData, "npm", "node_modules", "@openai", "codex", "bin", "codex.js"),
-  ].filter(Boolean);
-  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
-}
-
-function serializeTask(task) {
+function serializeSession(session) {
   return {
-    id: task.id,
-    title: task.title,
-    prompt: task.prompt,
-    cwd: task.cwd,
-    worktree: task.worktree,
-    runner: task.runner,
-    usage: task.usage,
-    status: task.status,
-    startedAt: task.startedAt,
-    endedAt: task.endedAt,
-    threadId: task.threadId,
-    exitCode: task.exitCode,
-    logs: task.logs,
-    closed: task.closed === true,
+    id: session.id,
+    title: session.title,
+    cwd: session.cwd,
+    cli: session.cli,
+    closed: session.closed === true,
+    createdAt: session.createdAt,
+    status: SESSION_STATUSES.has(session.status) ? session.status : session.closed ? "exited" : "idle",
+    statusAt: typeof session.statusAt === "string" ? session.statusAt : null,
+    unreviewed: session.unreviewed === true,
   };
 }
 
-function normalizePersistedUsage(usage) {
-  const fields = [
-    "inputTokens",
-    "cachedInputTokens",
-    "cacheWriteInputTokens",
-    "outputTokens",
-    "reasoningOutputTokens",
-    "totalTokens",
-    "turns",
-  ];
-  const normalized = {};
-  for (const field of fields) {
-    const value = usage?.[field];
-    normalized[field] = Number.isSafeInteger(value) && value >= 0 ? value : 0;
-  }
-  return normalized;
-}
-
-function restoreTask(record) {
-  if (!record || typeof record !== "object" || typeof record.id !== "string") return null;
-  const allowedStatuses = new Set(["running", "stopping", "completed", "failed", "stopped"]);
-  const savedStatus = allowedStatuses.has(record.status) ? record.status : "stopped";
-  const wasActive = savedStatus === "running" || savedStatus === "stopping";
-  const logs = Array.isArray(record.logs)
-    ? record.logs
-      .filter((log) => log && typeof log === "object" && typeof log.text === "string")
-      .slice(-MAX_LOGS)
-      .map((log) => ({
-        id: typeof log.id === "string" ? log.id : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        kind: typeof log.kind === "string" ? log.kind : "notice",
-        text: log.text.slice(0, MAX_LOG_TEXT),
-        at: typeof log.at === "string" ? log.at : new Date().toISOString(),
-      }))
-    : [];
-  const task = {
-    id: record.id,
-    title: typeof record.title === "string" ? record.title : "保存された依頼",
-    prompt: typeof record.prompt === "string" ? record.prompt : "",
-    cwd: typeof record.cwd === "string" ? record.cwd : "",
-    worktree: record.worktree === true,
-    usage: normalizePersistedUsage(record.usage),
-    runner: record.runner === "app-server" || record.runner === "exec"
-      ? record.runner
-      : (record.worktree === true || Object.prototype.hasOwnProperty.call(process.env, "CODEX_API_KEY") ? "exec" : "app-server"),
-    status: wasActive ? "stopped" : savedStatus,
-    startedAt: typeof record.startedAt === "string" ? record.startedAt : new Date().toISOString(),
-    endedAt: wasActive ? new Date().toISOString() : (typeof record.endedAt === "string" ? record.endedAt : null),
-    threadId: typeof record.threadId === "string" ? record.threadId : null,
-    exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null,
-    logs,
-    closed: record.closed === true,
-    stdoutBuffer: "",
-    stderrBuffer: "",
-    stopRequested: false,
-    child: null,
+function normalizeSession(record) {
+  if (!record || typeof record !== "object" || typeof record.id !== "string" || !record.id.trim()) return null;
+  if (typeof record.cwd !== "string" || !record.cwd.trim() || !path.isAbsolute(record.cwd)) return null;
+  const cli = record.cli === "claude" ? "claude" : record.cli === "codex" ? "codex" : null;
+  if (!cli) return null;
+  const cwd = path.resolve(record.cwd);
+  return {
+    id: record.id.slice(0, 160),
+    title: typeof record.title === "string" && record.title.trim() ? record.title.slice(0, 300) : path.basename(cwd) || cwd,
+    cwd,
+    cli,
+    closed: true,
+    createdAt: typeof record.createdAt === "string" && !Number.isNaN(Date.parse(record.createdAt)) ? record.createdAt : new Date().toISOString(),
+    status: "exited",
+    statusAt: new Date().toISOString(),
+    unreviewed: false,
+    buffer: "",
+    bufferBytes: 0,
+    sequence: 0,
+    inputLine: "",
   };
-  if (wasActive) {
-    const reason = task.threadId
-      ? "アプリ終了前に実行中だったため停止しました。保存済みのCodex会話から再開できます。"
-      : "アプリ終了前に実行中だったため停止しました。Codex会話IDがないため、この依頼は続行できません。";
-    task.logs.push({
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      kind: "system",
-      text: reason,
-      at: new Date().toISOString(),
-    });
-    if (task.logs.length > MAX_LOGS) task.logs.splice(0, task.logs.length - MAX_LOGS);
-  }
-  return task;
 }
 
-function scheduleTaskSave() {
-  if (!taskPersistenceReady || !taskStorePath) return;
-  if (taskSaveTimer) clearTimeout(taskSaveTimer);
-  taskSaveTimer = setTimeout(() => {
-    taskSaveTimer = null;
-    queueTaskSave();
-  }, TASK_SAVE_DEBOUNCE_MS);
-  taskSaveTimer.unref?.();
+function serializeSessions() {
+  return [...sessions.values()].map(serializeSession);
 }
 
-function queueTaskSave() {
-  if (!taskPersistenceReady || !taskStorePath) return taskWriteChain;
-  const snapshot = {
-    version: 1,
-    tasks: [...tasks.values()].map(serializeTask),
-  };
-  const content = JSON.stringify(snapshot, null, 2);
+function scheduleSessionSave() {
+  if (!sessionPersistenceReady || !sessionStorePath) return;
+  if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(() => {
+    sessionSaveTimer = null;
+    queueSessionSave();
+  }, SESSION_SAVE_DEBOUNCE_MS);
+}
+
+function queueSessionSave() {
+  if (!sessionPersistenceReady || !sessionStorePath) return Promise.resolve();
+  const contents = JSON.stringify({ version: 1, sessions: [...sessions.values()].slice(-MAX_SESSIONS).map(serializeSession) }, null, 2);
   const write = async () => {
-    const directory = path.dirname(taskStorePath);
-    await fs.promises.mkdir(directory, { recursive: true });
-    const tempPath = `${taskStorePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    await fs.promises.mkdir(path.dirname(sessionStorePath), { recursive: true });
+    const temporaryPath = sessionStorePath + "." + process.pid + "." + Date.now() + "." + Math.random().toString(16).slice(2) + ".tmp";
     try {
-      await fs.promises.writeFile(tempPath, content, "utf8");
-      await fs.promises.rename(tempPath, taskStorePath);
+      await fs.promises.writeFile(temporaryPath, contents, "utf8");
+      await fs.promises.rename(temporaryPath, sessionStorePath);
     } catch (error) {
-      await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+      await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
       throw error;
     }
   };
-  taskWriteChain = taskWriteChain.catch(() => {}).then(write);
-  taskWriteChain.catch((error) => console.error("タスク履歴の保存に失敗しました:", error));
-  return taskWriteChain;
+  sessionWriteChain = sessionWriteChain.catch(() => {}).then(write);
+  sessionWriteChain.catch((error) => console.error("セッション履歴の保存に失敗しました:", error));
+  return sessionWriteChain;
 }
 
-async function flushTaskSave() {
-  if (taskSaveTimer) {
-    clearTimeout(taskSaveTimer);
-    taskSaveTimer = null;
+async function flushSessionSave() {
+  if (sessionSaveTimer) {
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = null;
   }
-  await queueTaskSave();
-  await taskWriteChain;
+  await queueSessionSave();
+  await sessionWriteChain;
 }
 
-function loadPersistedTasks() {
-  taskStorePath = path.join(app.getPath("userData"), TASK_STORE_FILE);
-  const currentPathKey = path.resolve(taskStorePath).toLowerCase();
-  const legacyPaths = ["Codex Run Desk", "codex-cli-run-desk"]
-    .map((name) => path.join(app.getPath("appData"), name, TASK_STORE_FILE))
-    .filter((candidate) => path.resolve(candidate).toLowerCase() !== currentPathKey);
-  let contents = null;
-  let loadedFromLegacyPath = false;
+function readJsonFile(filePath) {
   try {
-    contents = fs.readFileSync(taskStorePath, "utf8");
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile() || stats.size > SESSION_READ_LIMIT_BYTES) return null;
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch (error) {
-    if (error.code !== "ENOENT") {
-      console.error("タスク履歴を読み込めませんでした:", error);
-    } else {
-      for (const legacyPath of legacyPaths) {
-        try {
-          contents = fs.readFileSync(legacyPath, "utf8");
-          loadedFromLegacyPath = true;
-          break;
-        } catch (legacyError) {
-          if (legacyError.code !== "ENOENT") {
-            console.error("旧アプリのタスク履歴を読み込めませんでした:", legacyError);
-          }
-        }
-      }
-    }
+    if (error?.code !== "ENOENT") console.error("セッション履歴を読み込めませんでした:", error?.message || error);
+    return null;
   }
-  let recoveredActiveTask = false;
-  if (contents !== null) {
-    try {
-    const saved = JSON.parse(contents);
-    const records = Array.isArray(saved) ? saved : saved?.tasks;
-    if (Array.isArray(records)) {
-      for (const record of records) {
-        const task = restoreTask(record);
-        if (!task) continue;
-        if (record.status === "running" || record.status === "stopping") recoveredActiveTask = true;
-        tasks.set(task.id, task);
-      }
-    }
-    } catch (error) {
-      console.error("タスク履歴を読み込めませんでした:", error);
-    }
-  }
-  taskPersistenceReady = true;
-  if (recoveredActiveTask || loadedFromLegacyPath) scheduleTaskSave();
 }
 
-function broadcastTasks() {
-  const snapshot = [...tasks.values()].map(serializeTask);
-  scheduleTaskSave();
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) window.webContents.send("tasks:updated", snapshot);
+function legacyTaskFiles() {
+  const names = ["Codex Run Desk", "codex-cli-run-desk"];
+  return [path.join(path.dirname(sessionStorePath), "tasks.json"), ...names.map((name) => path.join(app.getPath("appData"), name, "tasks.json"))]
+    .filter((candidate, index, items) => items.findIndex((item) => path.resolve(item).toLowerCase() === path.resolve(candidate).toLowerCase()) === index);
+}
+
+function loadPersistedSessions() {
+  sessionStorePath = path.join(app.getPath("userData"), SESSION_STORE_FILE);
+  const stored = readJsonFile(sessionStorePath);
+  const storedSessions = Array.isArray(stored?.sessions) ? stored.sessions : Array.isArray(stored) ? stored : null;
+  if (storedSessions) {
+    for (const record of storedSessions.slice(-MAX_SESSIONS)) {
+      const session = normalizeSession(record);
+      if (session && !sessions.has(session.id)) sessions.set(session.id, session);
+    }
+  } else {
+    const migratedIds = new Set();
+    for (const legacyPath of legacyTaskFiles()) {
+      const legacy = readJsonFile(legacyPath);
+      if (!Array.isArray(legacy?.tasks)) continue;
+      for (const record of legacy.tasks.slice(-MAX_SESSIONS)) {
+        if (!record || typeof record.id !== "string" || typeof record.cwd !== "string" || !path.isAbsolute(record.cwd)) continue;
+        const session = normalizeSession({
+          id: record.id,
+          title: record.title,
+          cwd: record.cwd,
+          cli: "codex",
+          closed: true,
+          createdAt: record.startedAt,
+        });
+        if (!session || migratedIds.has(session.id)) continue;
+        migratedIds.add(session.id);
+        sessions.set(session.id, session);
+        if (sessions.size >= MAX_SESSIONS) break;
+      }
+      if (sessions.size >= MAX_SESSIONS) break;
+    }
   }
+  sessionPersistenceReady = true;
+  if (sessions.size > 0) scheduleSessionSave();
+  updateUnreviewedBadge();
+}
+
+function broadcastSessions() {
+  const snapshot = serializeSessions();
+  scheduleSessionSave();
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send("sessions:updated", snapshot);
+  }
+}
+
+function isApplicationFocused() {
+  try {
+    const focused = BrowserWindow.getFocusedWindow();
+    if (focused && !focused.isDestroyed()) return true;
+    return BrowserWindow.getAllWindows().some((window) => !window.isDestroyed() && typeof window.isFocused === "function" && window.isFocused());
+  } catch {
+    return false;
+  }
+}
+
+function countUnreviewedSessions() {
+  let count = 0;
+  for (const session of sessions.values()) {
+    if (session.unreviewed && (session.status === "completed" || session.status === "approval")) count += 1;
+  }
+  return count;
+}
+
+let windowsBadgeImage = null;
+function updateUnreviewedBadge() {
+  const count = countUnreviewedSessions();
+  if (process.platform === "darwin") {
+    try { app.dock?.setBadge(count ? String(count) : ""); } catch {}
+  } else if (process.platform === "win32") {
+    if (!windowsBadgeImage && nativeImage?.createFromDataURL) {
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="#ef554b" stroke="#ffffff" stroke-width="1"/></svg>';
+      windowsBadgeImage = nativeImage.createFromDataURL("data:image/svg+xml;base64," + Buffer.from(svg).toString("base64"));
+    }
+    const tooltip = count ? `未確認 ${count} 件` : "未確認なし";
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed()) continue;
+      try { window.setOverlayIcon?.(count ? windowsBadgeImage : null, tooltip); } catch {}
+    }
+  } else if (process.platform === "linux") {
+    try { app.setBadgeCount?.(count); } catch {}
+  }
+}
+
+function notifyAttention(session, status) {
+  if (isApplicationFocused()) return;
+  try {
+    if (typeof Notification?.isSupported === "function" && !Notification.isSupported()) return;
+    const message = status === "approval" ? "承認または入力を待っています" : "作業が完了しました";
+    new Notification({ title: `CimLine · ${session.title}`, body: message }).show();
+  } catch {}
+}
+
+function setSessionStatus(session, status, { timestamp = new Date().toISOString(), broadcast = true } = {}) {
+  if (!session || !SESSION_STATUSES.has(status)) return false;
+  const previousStatus = session.status;
+  const wasUnreviewed = session.unreviewed === true;
+  session.status = status;
+  session.statusAt = timestamp;
+  if (status === "completed" || status === "approval") {
+    session.unreviewed = focusedSessionId !== session.id || !isApplicationFocused();
+    if (session.unreviewed && !wasUnreviewed && previousStatus !== status) notifyAttention(session, status);
+  } else {
+    session.unreviewed = false;
+  }
+  updateUnreviewedBadge();
+  if (broadcast) broadcastSessions();
+  else scheduleSessionSave();
+  return true;
+}
+
+function focusSession(sessionId) {
+  if (sessionId !== null && (typeof sessionId !== "string" || sessionId.length > 160)) throw new Error("フォーカス対象が無効です。");
+  if (sessionId !== null && !sessions.has(sessionId)) return false;
+  focusedSessionId = sessionId;
+  const session = sessionId === null ? null : sessions.get(sessionId);
+  if (session?.unreviewed) {
+    session.unreviewed = false;
+    updateUnreviewedBadge();
+    broadcastSessions();
+  }
+  return true;
+}
+
+function sendNotifyResponse(response, statusCode) {
+  if (response.writableEnded) return;
+  response.writeHead(statusCode, { "content-length": "0", "cache-control": "no-store" });
+  response.end();
+}
+
+function isLoopbackAddress(address) {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function isValidNotifyToken(candidate) {
+  if (typeof candidate !== "string" || !notifyToken) return false;
+  const expected = Buffer.from(notifyToken, "utf8");
+  const received = Buffer.from(candidate, "utf8");
+  return received.length === expected.length && timingSafeEqual(received, expected);
+}
+
+function handleNotifyRequest(request, response) {
+  if (request.method !== "POST" || request.url !== NOTIFY_ENDPOINT) return sendNotifyResponse(response, 404);
+  if (!isLoopbackAddress(request.socket.remoteAddress)) return sendNotifyResponse(response, 403);
+  const contentLength = Number(request.headers["content-length"]);
+  if (Number.isFinite(contentLength) && contentLength > MAX_NOTIFY_BODY_BYTES) {
+    request.resume();
+    return sendNotifyResponse(response, 413);
+  }
+  const chunks = [];
+  let bytes = 0;
+  let rejected = false;
+  request.on("data", (chunk) => {
+    if (rejected) return;
+    bytes += chunk.byteLength;
+    if (bytes > MAX_NOTIFY_BODY_BYTES) {
+      rejected = true;
+      chunks.length = 0;
+      sendNotifyResponse(response, 413);
+      request.resume();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  request.on("end", () => {
+    if (rejected) return;
+    let payload;
+    try { payload = JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")); } catch { return sendNotifyResponse(response, 400); }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return sendNotifyResponse(response, 400);
+    const keys = Object.keys(payload).sort();
+    if (keys.length !== 3 || keys[0] !== "event" || keys[1] !== "sessionId" || keys[2] !== "token") return sendNotifyResponse(response, 400);
+    if (!isValidNotifyToken(payload.token)) return sendNotifyResponse(response, 401);
+    if (typeof payload.event !== "string" || !NOTIFY_EVENTS.has(payload.event) || typeof payload.sessionId !== "string" || payload.sessionId.length > 160) {
+      return sendNotifyResponse(response, 400);
+    }
+    const session = sessions.get(payload.sessionId);
+    if (!session || session.closed || !livePtys.has(session.id)) return sendNotifyResponse(response, 404);
+    setSessionStatus(session, payload.event);
+    sendNotifyResponse(response, 202);
+  });
+  request.on("error", () => sendNotifyResponse(response, 400));
+}
+
+function startNotifyServer() {
+  if (notifyServer) return Promise.resolve(notifyUrl);
+  notifyToken = randomBytes(32).toString("hex");
+  notifyServer = http.createServer(handleNotifyRequest);
+  notifyServer.on("clientError", (_error, socket) => { try { socket.destroy(); } catch {} });
+  notifyServer.unref?.();
+  return new Promise((resolve, reject) => {
+    const server = notifyServer;
+    server.once("error", (error) => {
+      if (notifyServer === server) {
+        notifyServer = null;
+        notifyToken = null;
+        notifyUrl = null;
+      }
+      reject(error);
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") return reject(new Error("通知サーバーのアドレスを取得できません。"));
+      notifyUrl = `http://127.0.0.1:${address.port}${NOTIFY_ENDPOINT}`;
+      resolve(notifyUrl);
+    });
+  });
+}
+
+function stopNotifyServer() {
+  const server = notifyServer;
+  notifyServer = null;
+  notifyToken = null;
+  notifyUrl = null;
+  try { server?.close(); } catch {}
 }
 
 function acquireCodexStartupLock() {
   let releaseGate;
-  const gate = new Promise((resolve) => {
-    releaseGate = resolve;
-  });
+  const gate = new Promise((resolve) => { releaseGate = resolve; });
   const previous = codexStartupQueue;
   codexStartupQueue = previous.catch(() => {}).then(() => gate);
   return previous.catch(() => {}).then(() => {
@@ -257,128 +385,63 @@ function acquireCodexStartupLock() {
   });
 }
 
-function releaseTaskStartupLock(task) {
-  if (!task?.startupLockRelease) return;
-  const release = task.startupLockRelease;
-  task.startupLockRelease = null;
-  release();
-}
-
-function appendLog(task, kind, text) {
-  const message = String(text || "").trim();
-  if (!message) return;
-  task.logs.push({
-    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    kind,
-    text: message.slice(0, MAX_LOG_TEXT),
-    at: new Date().toISOString(),
-  });
-  if (task.logs.length > MAX_LOGS) task.logs.splice(0, task.logs.length - MAX_LOGS);
-  broadcastTasks();
-}
-
-function extractItemText(item) {
-  if (!item || typeof item !== "object") return "";
-  if (item.type === "agent_message") return item.text || "";
-  if (item.type === "command_execution") {
-    const command = Array.isArray(item.command) ? item.command.join(" ") : item.command;
-    const output = item.aggregated_output || item.output || "";
-    return [command ? `$ ${command}` : "コマンドを実行", output].filter(Boolean).join("\n");
-  }
-  if (item.type === "file_change") {
-    return (item.changes || []).map((change) => `${change.kind || "変更"}: ${change.path || ""}`).join("\n") || "ファイルを変更しました";
-  }
-  if (item.type === "mcp_tool_call") {
-    const result = item.result || item.arguments || item.tool || "ツールを実行しました";
-    return typeof result === "string" ? result : JSON.stringify(result, null, 2);
-  }
-  return item.text || "";
-}
-
-function readUsageCount(usage, snakeCaseKey, camelCaseKey) {
-  const value = usage?.[snakeCaseKey] ?? usage?.[camelCaseKey];
-  return Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
-
-function normalizeTurnUsage(usage) {
-  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
-
-  const inputTokens = readUsageCount(usage, "input_tokens", "inputTokens");
-  const cachedInputTokens = readUsageCount(usage, "cached_input_tokens", "cachedInputTokens");
-  const cacheWriteInputTokens = readUsageCount(usage, "cache_write_input_tokens", "cacheWriteInputTokens");
-  const outputTokens = readUsageCount(usage, "output_tokens", "outputTokens");
-  const reasoningOutputTokens = readUsageCount(usage, "reasoning_output_tokens", "reasoningOutputTokens");
-  const totalTokens = readUsageCount(usage, "total_tokens", "totalTokens");
-
-  const counts = [inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens, reasoningOutputTokens, totalTokens];
-  if (counts.every((value) => value === null) || counts.every((value) => value === null || value === 0)) {
-    return null;
-  }
-
-  return {
-    inputTokens: inputTokens ?? 0,
-    cachedInputTokens: cachedInputTokens ?? 0,
-    cacheWriteInputTokens: cacheWriteInputTokens ?? 0,
-    outputTokens: outputTokens ?? 0,
-    reasoningOutputTokens: reasoningOutputTokens ?? 0,
-    totalTokens: totalTokens ?? ((inputTokens ?? 0) + (outputTokens ?? 0)),
-  };
-}
-
-function consumeCliEvent(task, line) {
-  if (!line.trim()) return;
-  let event;
-  try {
-    event = JSON.parse(line);
-  } catch {
-    appendLog(task, "notice", line);
-    return;
-  }
-
-  if (event.type === "thread.started" && event.thread_id) {
-    task.threadId = event.thread_id;
-    broadcastTasks();
-  }
-  if (event.type === "turn.started") appendLog(task, "system", "Codex が作業を始めました");
-  if (event.type === "turn.started") releaseTaskStartupLock(task);
-  if (event.type === "item.started" && event.item?.type === "command_execution") {
-    const command = Array.isArray(event.item.command) ? event.item.command.join(" ") : event.item.command;
-    if (command) appendLog(task, "system", `コマンド実行中: ${command}`);
-  }
-  if (event.type === "item.completed") {
-    const item = event.item || {};
-    const text = extractItemText(item);
-    if (text) appendLog(task, item.type === "agent_message" ? "assistant" : item.type === "command_execution" ? "command" : "activity", text);
-  }
-  if (event.type === "turn.completed") appendLog(task, "system", "この依頼の応答が完了しました");
-  if (event.type === "turn.completed") {
-    task.usage.turns += 1;
-    const usage = normalizeTurnUsage(event.usage);
-    if (usage) {
-      // Codex exec --json reports the thread's accumulated usage in turn.completed.
-      // Assign the reported snapshot so resumed turns do not count earlier turns twice.
-      task.usage.inputTokens = usage.inputTokens;
-      task.usage.cachedInputTokens = usage.cachedInputTokens;
-      task.usage.cacheWriteInputTokens = usage.cacheWriteInputTokens;
-      task.usage.outputTokens = usage.outputTokens;
-      task.usage.reasoningOutputTokens = usage.reasoningOutputTokens;
-      task.usage.totalTokens = usage.totalTokens;
-    } else {
-      appendLog(task, "notice", "Codex CLI の完了イベントにトークン数が含まれていません");
+function resolveOnPath(command) {
+  if (typeof command !== "string" || !command.trim()) return null;
+  const value = command.trim();
+  const extensions = process.platform === "win32"
+    ? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";")
+    : [""];
+  const candidates = [];
+  if (path.isAbsolute(value) || value.includes(path.sep) || (path.sep === "\\" && value.includes("/"))) {
+    candidates.push(value);
+    if (process.platform === "win32" && !path.extname(value)) candidates.push(...extensions.map((extension) => value + extension));
+  } else {
+    for (const directory of String(process.env.PATH || "").split(path.delimiter).filter(Boolean)) {
+      const normalizedDirectory = directory.replace(/^"|"$/g, "");
+      candidates.push(path.join(normalizedDirectory, value));
+      if (process.platform === "win32" && !path.extname(value)) candidates.push(...extensions.map((extension) => path.join(normalizedDirectory, value + extension)));
     }
-    broadcastTasks();
   }
-  if (event.type === "turn.failed" || event.type === "error") {
-    appendLog(task, "error", event.message || event.error?.message || "Codex CLI がエラーを返しました");
+  return candidates.find((candidate) => {
+    try { return fs.statSync(candidate).isFile(); } catch { return false; }
+  }) || null;
+}
+
+function globalNodeModulesRoots() {
+  const roots = [];
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+    roots.push(path.join(appData, "npm", "node_modules"));
+    roots.push(path.join(os.homedir(), ".npm-global", "lib", "node_modules"));
+  } else {
+    try {
+      const npmPath = resolveOnPath("npm") || "npm";
+      const root = execFileSync(npmPath, ["root", "-g"], { encoding: "utf8", timeout: 3000, windowsHide: true }).trim();
+      if (root) roots.push(root);
+    } catch {}
+    roots.push("/usr/local/lib/node_modules", "/opt/homebrew/lib/node_modules", path.join(os.homedir(), ".npm-global", "lib", "node_modules"));
   }
+  return [...new Set(roots.map((root) => path.resolve(root)))];
+}
+
+function resolveCodexScript() {
+  const candidates = [
+    process.env.CODEX_CLI_JS,
+    ...globalNodeModulesRoots().map((root) => path.join(root, "@openai", "codex", "bin", "codex.js")),
+  ].filter(Boolean);
+  return candidates.find((candidate) => {
+    try { return fs.statSync(candidate).isFile(); } catch { return false; }
+  }) || null;
 }
 
 function requireCodexScript() {
   const scriptPath = resolveCodexScript();
-  if (!scriptPath) {
-    throw new Error("Codex CLI の場所を確認できません。Node.js と npm のグローバルインストールを確認するか、CODEX_CLI_JS に codex.js のパスを設定してください。");
-  }
+  if (!scriptPath) throw new Error("Codex CLIの場所を確認できません。Node.js/npmのグローバルインストールを確認するか、CODEX_CLI_JSにcodex.jsのパスを設定してください。");
   return scriptPath;
+}
+
+function getNodeBinary() {
+  return process.env.CODEX_NODE_EXE || resolveOnPath("node.exe") || resolveOnPath("node") || (process.platform === "win32" ? "node.exe" : "node");
 }
 
 function normalizeRateLimitWindow(window) {
@@ -394,35 +457,35 @@ function normalizeRateLimitWindow(window) {
   };
 }
 
+function redactRateLimitDiagnostic(value) {
+  return String(value || "")
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/((?:[\w.-]*)(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|client[_-]?secret|credential|cookie|password))\s*[:=]\s*(?:"(?:Bearer\s+)?[^"]*"|'(?:Bearer\s+)?[^']*'|(?:Bearer\s+|Basic\s+)?[^\s,;&}\]]+)/gi, "$1=[redacted]")
+    .replace(/\bBearer\s+[^\s,;&}\]]+/gi, "Bearer [redacted]")
+    .replace(/\b(?:sk|sess|tok|ghp|gho|ghu|ghs|ghr|github_pat)-[A-Za-z0-9_-]{10,}\b/gi, "[redacted]")
+    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted JWT]");
+}
+
 async function getCodexRateLimits() {
   const scriptPath = requireCodexScript();
-  const nodeBinary = process.env.CODEX_NODE_EXE || (process.platform === "win32" ? "node.exe" : "node");
   const releaseStartup = await acquireCodexStartupLock();
-
   return new Promise((resolve, reject) => {
     let settled = false;
     let initialized = false;
     let stdoutBuffer = "";
+    let stderrBuffer = "";
     let startupReleased = false;
     let child;
+    let rateLimitRequestId = 2;
+    let retriedWithNullParams = false;
     const releaseStartupOnce = () => {
       if (startupReleased) return;
       startupReleased = true;
       releaseStartup();
     };
-    try {
-      child = spawn(nodeBinary, [scriptPath, "app-server", "--stdio"], {
-        cwd: app.getPath("home"),
-        env: process.env,
-        windowsHide: true,
-        stdio: ["pipe", "pipe", "ignore"],
-      });
-    } catch (error) {
-      releaseStartupOnce();
-      reject(error);
-      return;
-    }
-
+    const appendStderr = (chunk) => {
+      stderrBuffer = redactRateLimitDiagnostic(stderrBuffer + chunk).slice(-MAX_RATE_LIMIT_STDERR_BUFFER_CHARS);
+    };
     const finish = (error, result) => {
       if (settled) return;
       settled = true;
@@ -432,23 +495,33 @@ async function getCodexRateLimits() {
       else resolve(result);
       child?.kill();
     };
-    const send = (message) => {
-      try {
-        child.stdin.write(`${JSON.stringify(message)}\n`);
-        return true;
-      } catch (error) {
-        finish(new Error(`Codex app-serverへ接続できませんでした: ${error.message}`));
-        return false;
-      }
+    const fail = (message) => {
+      const safeMessage = redactRateLimitDiagnostic(message).replace(/\s+/g, " ").trim().slice(0, 420);
+      const safeStderr = stderrBuffer.trim().slice(-MAX_RATE_LIMIT_STDERR_CHARS);
+      const detail = safeStderr ? "\nCodex app-server stderr: " + safeStderr : "";
+      finish(new Error((safeMessage + detail).slice(0, MAX_RATE_LIMIT_ERROR_CHARS)));
     };
-    const timeout = setTimeout(() => finish(new Error("Codexの利用枠情報の取得がタイムアウトしました。")), 15000);
-
-    child.on("error", (error) => finish(new Error(`Codex app-serverを起動できませんでした: ${error.message}`)));
-    child.on("close", (code) => {
-      if (!settled) finish(new Error(`Codex app-serverが応答前に終了しました (終了コード ${code ?? "不明"})。`));
-    });
-    child.stdin.on("error", (error) => finish(new Error(`Codex app-serverへ接続できませんでした: ${error.message}`)));
+    const send = (message) => {
+      try { child.stdin.write(JSON.stringify(message) + "\n"); return true; }
+      catch (error) { fail("Codex app-serverへ接続できませんでした: " + error.message); return false; }
+    };
+    const timeout = setTimeout(() => fail("Codexの利用枠情報の取得がタイムアウトしました。"), 15000);
+    try {
+      child = spawn(getNodeBinary(), [scriptPath, "app-server", "--stdio"], {
+        cwd: app.getPath("home"), env: process.env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      clearTimeout(timeout);
+      releaseStartupOnce();
+      reject(new Error(redactRateLimitDiagnostic(error?.message || error).slice(0, MAX_RATE_LIMIT_ERROR_CHARS)));
+      return;
+    }
+    child.on("error", (error) => fail("Codex app-serverを起動できませんでした: " + error.message));
+    child.on("close", (code) => { if (!settled) fail("Codex app-serverが応答前に終了しました (終了コード " + (code ?? "不明") + ")。"); });
+    child.stdin.on("error", (error) => fail("Codex app-serverへ接続できませんでした: " + error.message));
     child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", appendStderr);
     child.stdout.on("data", (chunk) => {
       stdoutBuffer += chunk;
       const lines = stdoutBuffer.split(/\r?\n/);
@@ -456,52 +529,38 @@ async function getCodexRateLimits() {
       for (const line of lines) {
         if (!line.trim()) continue;
         let message;
-        try {
-          message = JSON.parse(line);
-        } catch {
-          continue;
-        }
-
+        try { message = JSON.parse(line); } catch { continue; }
         if (message.id === 1) {
-          if (message.error) {
-            finish(new Error(message.error.message || "Codex app-serverの初期化に失敗しました。"));
-            return;
-          }
+          if (message.error) { fail(message.error.message || "Codex app-serverの初期化に失敗しました。"); return; }
           if (!initialized) {
             initialized = true;
             releaseStartupOnce();
             send({ method: "initialized", params: {} });
-            send({ id: 2, method: "account/rateLimits/read", params: {} });
+            send({ id: rateLimitRequestId, method: "account/rateLimits/read", params: { supportsLunaReserve: true } });
           }
           continue;
         }
-
-        if (message.id !== 2) continue;
+        if (message.id !== rateLimitRequestId) continue;
         if (message.error) {
-          finish(new Error(message.error.message || "Codexの利用枠情報を取得できませんでした。"));
+          if (!retriedWithNullParams && (message.error.code === -32600 || message.error.code === -32602)) {
+            retriedWithNullParams = true;
+            rateLimitRequestId += 1;
+            send({ id: rateLimitRequestId, method: "account/rateLimits/read", params: null });
+            continue;
+          }
+          const errorCode = Number.isInteger(message.error.code) ? " (JSON-RPC " + message.error.code + ")" : "";
+          fail("Codexの利用枠情報の取得に失敗しました" + errorCode + ": " + (message.error.message || "詳細不明"));
           return;
         }
         const snapshot = message.result?.rateLimits ?? message.result?.rate_limits;
-        if (!snapshot) {
-          finish(new Error("Codexから利用枠情報が返されませんでした。"));
-          return;
-        }
-        finish(null, {
-          primary: normalizeRateLimitWindow(snapshot.primary),
-          secondary: normalizeRateLimitWindow(snapshot.secondary),
-        });
+        if (!snapshot) { fail("Codex app-serverの応答にrateLimitsが含まれていません。"); return; }
+        finish(null, { primary: normalizeRateLimitWindow(snapshot.primary), secondary: normalizeRateLimitWindow(snapshot.secondary) });
         return;
       }
     });
-
-    send({
-      id: 1,
-      method: "initialize",
-      params: { clientInfo: { name: "cimline", title: "CimLine", version: app.getVersion() } },
-    });
+    send({ id: 1, method: "initialize", params: { clientInfo: { name: "cimline", title: "CimLine", version: app.getVersion() } } });
   });
 }
-
 function decodeSkillFrontmatterScalar(rawValue) {
   let value = String(rawValue || "").trim();
   if (!value) return "";
@@ -1199,512 +1258,441 @@ async function getSkills(projectPaths) {
 
   return { skills, warnings };
 }
-
-function markTaskStartupFailure(task, error) {
-  releaseTaskStartupLock(task);
-  task.status = task.stopRequested ? "stopped" : "failed";
-  task.endedAt = new Date().toISOString();
-  if (!task.stopRequested) appendLog(task, "error", error?.message || String(error));
-  broadcastTasks();
+function shellQuote(value, kind) {
+  const text = String(value);
+  if (kind === "powershell") return "'" + text.replace(/'/g, "''") + "'";
+  return "'" + text.replace(/'/g, "'\\''") + "'";
 }
 
-function readProtocolTokenCount(value) {
-  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+function powershellLiteral(value) {
+  return "'" + String(value).replace(/'/g, "''") + "'";
 }
 
-function updateThreadTokenUsage(task, tokenUsage) {
-  if (!tokenUsage || typeof tokenUsage !== "object") return;
-  const total = tokenUsage.total;
-  const fields = [
-    ["inputTokens", "inputTokens"],
-    ["cachedInputTokens", "cachedInputTokens"],
-    ["cacheWriteInputTokens", "cacheWriteInputTokens"],
-    ["outputTokens", "outputTokens"],
-    ["reasoningOutputTokens", "reasoningOutputTokens"],
-    ["totalTokens", "totalTokens"],
-  ];
-  for (const [taskField, usageField] of fields) {
-    const value = readProtocolTokenCount(total?.[usageField]);
-    if (value !== null) task.usage[taskField] = value;
-  }
-
-  broadcastTasks();
+function resolvePowerShellBinary() {
+  return resolveOnPath("pwsh.exe") || resolveOnPath("pwsh") || resolveOnPath("powershell.exe") || resolveOnPath("powershell") || path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
 
-function extractAppServerItemText(item) {
-  if (!item || typeof item !== "object") return "";
-  const type = item.type;
-  if (type === "agentMessage" || type === "agent_message") return item.text || "";
-  if (type === "commandExecution" || type === "command_execution") {
-    const command = Array.isArray(item.command) ? item.command.join(" ") : item.command;
-    const output = item.aggregatedOutput || item.aggregated_output || item.output || "";
-    return [command ? `$ ${command}` : "コマンドを実行", output].filter(Boolean).join("\n");
-  }
-  if (type === "fileChange" || type === "file_change") {
-    return (item.changes || []).map((change) => `${change.kind || "変更"}: ${change.path || ""}`).join("\n") || "ファイルを変更しました";
-  }
-  if (type === "mcpToolCall" || type === "mcp_tool_call") {
-    const result = item.result || item.arguments || item.tool || "ツールを実行しました";
-    return typeof result === "string" ? result : JSON.stringify(result, null, 2);
-  }
-  return item.text || "";
-}
+function ensureSessionHooks(session) {
+  if (!notifyUrl || !notifyToken) return null;
+  try {
+    const safeId = Buffer.from(session.id, "utf8").toString("base64url") || "session";
+    const hookDirectory = path.join(app.getPath("userData"), "hooks", safeId);
+    const hookScript = path.join(__dirname, "notify-hook.cjs");
+    fs.mkdirSync(hookDirectory, { recursive: true });
 
-function terminateChildProcess(child) {
-  if (!child) return;
-  if (process.platform === "win32" && child.pid) {
-    execFile("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], (error) => {
-      if (error) child.kill();
-    });
-  } else {
-    child.kill("SIGTERM");
-  }
-}
-
-function launchCodexExec(task, prompt, { resume = false, releaseStartup }) {
-  const scriptPath = requireCodexScript();
-  const nodeBinary = process.env.CODEX_NODE_EXE || (process.platform === "win32" ? "node.exe" : "node");
-  const args = resume
-    ? [scriptPath, "exec", "--json", "--skip-git-repo-check", "resume", "--all", task.threadId, "-"]
-    : [scriptPath, "exec", "--json", "--skip-git-repo-check", ...(task.worktree ? ["--worktree"] : []), "-C", task.cwd, "-"];
-  const child = spawn(nodeBinary, args, {
-    cwd: task.cwd,
-    env: process.env,
-    windowsHide: true,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  task.child = child;
-  task.appServerMode = false;
-  task.stdoutBuffer = "";
-  task.stderrBuffer = "";
-  task.startupLockRelease = releaseStartup;
-  broadcastTasks();
-  appendLog(task, "system", resume ? "会話を再開しました" : "Codex CLI を起動しました");
-
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    task.stdoutBuffer += chunk;
-    const lines = task.stdoutBuffer.split(/\r?\n/);
-    task.stdoutBuffer = lines.pop() || "";
-    for (const line of lines) consumeCliEvent(task, line);
-  });
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => {
-    task.stderrBuffer += chunk;
-    const lines = task.stderrBuffer.split(/\r?\n/);
-    task.stderrBuffer = lines.pop() || "";
-    for (const line of lines) appendLog(task, "notice", line);
-  });
-  child.on("error", (error) => {
-    releaseTaskStartupLock(task);
-    task.status = "failed";
-    task.endedAt = new Date().toISOString();
-    appendLog(task, "error", error.message);
-    broadcastTasks();
-  });
-  child.on("close", (code) => {
-    if (task.child !== child) return;
-    releaseTaskStartupLock(task);
-    if (task.stdoutBuffer.trim()) consumeCliEvent(task, task.stdoutBuffer);
-    if (task.stderrBuffer.trim()) appendLog(task, "notice", task.stderrBuffer);
-    task.exitCode = code;
-    if (task.stopRequested) {
-      task.status = "stopped";
+    let wrapperPath;
+    let codexNotifyArgs;
+    let claudeHookCommand;
+    let buildClaudeHookArgs;
+    if (process.platform === "win32") {
+      wrapperPath = path.join(hookDirectory, "notify-wrapper.ps1");
+      const wrapper = [
+        "$ErrorActionPreference = 'SilentlyContinue'",
+        "$env:ELECTRON_RUN_AS_NODE = '1'",
+        `try { & ${powershellLiteral(process.execPath)} ${powershellLiteral(hookScript)} @args 2>$null | Out-Null } catch {}`,
+        "exit 0",
+        "",
+      ].join("\r\n");
+      fs.writeFileSync(wrapperPath, wrapper, { encoding: "utf8" });
+      const powershell = resolvePowerShellBinary();
+      const powershellPrefix = ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", wrapperPath];
+      codexNotifyArgs = [powershell, ...powershellPrefix, "codex"];
+      claudeHookCommand = powershell;
+      buildClaudeHookArgs = (event) => [...powershellPrefix, "claude", event];
     } else {
-      task.status = code === 0 ? "completed" : "failed";
-      if (code !== 0) appendLog(task, "error", `Codex CLI が終了コード ${code} で終了しました`);
-    }
-    task.endedAt = new Date().toISOString();
-    broadcastTasks();
-  });
-  child.stdin.on("error", () => {});
-  child.stdin.end(prompt);
-}
-
-function launchCodexAppServer(task, prompt, { resume = false, releaseStartup }) {
-  const scriptPath = requireCodexScript();
-  const nodeBinary = process.env.CODEX_NODE_EXE || (process.platform === "win32" ? "node.exe" : "node");
-  const child = spawn(nodeBinary, [scriptPath, "app-server", "--stdio"], {
-    cwd: task.cwd,
-    env: process.env,
-    windowsHide: true,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let stdoutBuffer = "";
-  let requestId = 1;
-  let turnStartSent = false;
-  let settledTurn = false;
-  const pendingRequests = new Map();
-  let resolveExit;
-  task.appServerExitPromise = new Promise((resolve) => {
-    resolveExit = resolve;
-  });
-  task.appServerMode = true;
-  task.appServerTurnId = null;
-  task.appServerTurnFinished = false;
-  task.appServerRequest = null;
-  task.child = child;
-  task.startupLockRelease = releaseStartup;
-  broadcastTasks();
-  appendLog(task, "system", resume ? "Codex app-serverで保存済み会話を再開しました" : "Codex app-serverを起動しました");
-
-  const send = (message) => {
-    if (child.stdin.destroyed || child.stdin.writableEnded) throw new Error("Codex app-serverへの接続が閉じています。");
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
-  };
-  const request = (method, params) => new Promise((resolve, reject) => {
-    const id = requestId++;
-    const timer = setTimeout(() => {
-      pendingRequests.delete(id);
-      reject(new Error(`Codex app-serverの${method}がタイムアウトしました。`));
-    }, APP_SERVER_REQUEST_TIMEOUT_MS);
-    pendingRequests.set(id, { resolve, reject, timer, method });
-    try {
-      send({ id, method, params });
-    } catch (error) {
-      clearTimeout(timer);
-      pendingRequests.delete(id);
-      reject(error);
-    }
-  });
-  task.appServerRequest = request;
-
-  const clearPending = (error) => {
-    for (const pending of pendingRequests.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(error);
-    }
-    pendingRequests.clear();
-  };
-  const startupTimeout = setTimeout(() => {
-    if (task.child !== child || task.appServerTurnFinished) return;
-    appendLog(task, "error", "Codex app-serverの初期化がタイムアウトしました。");
-    terminateChildProcess(child);
-  }, APP_SERVER_REQUEST_TIMEOUT_MS * 2);
-  const releaseStartupOnce = () => {
-    clearTimeout(startupTimeout);
-    releaseTaskStartupLock(task);
-  };
-  const finishTurn = (turn) => {
-    if (settledTurn) return;
-    settledTurn = true;
-    task.appServerTurnFinished = true;
-    releaseStartupOnce();
-    clearTimeout(task.appServerInterruptTimer);
-    task.appServerInterruptTimer = null;
-    const status = turn?.status;
-    const errorText = turn?.error?.message || turn?.error?.codexErrorInfo || "Codex app-serverのターンが失敗しました。";
-    if (task.stopRequested || status === "interrupted") {
-      task.status = "stopped";
-      task.exitCode = null;
-    } else if (status === "completed") {
-      task.status = "completed";
-      task.exitCode = 0;
-    } else {
-      task.status = "failed";
-      task.exitCode = 1;
-      appendLog(task, "error", errorText);
-    }
-    task.endedAt = new Date().toISOString();
-    task.usage.turns += 1;
-    appendLog(task, "system", status === "completed" ? "この依頼の応答が完了しました" : task.status === "stopped" ? "Codexの作業を停止しました" : "Codexの作業が失敗しました");
-    broadcastTasks();
-    try {
-      child.stdin.end();
-    } catch {}
-  };
-
-  const handleMessage = (message) => {
-    if (message && typeof message.method === "string" && message.id !== undefined && message.id !== null) {
-      appendLog(task, "notice", `Codex app-serverの要求「${message.method}」は自動承認せず拒否しました`);
-      try {
-        send({ id: message.id, error: { code: -32601, message: "CimLine does not handle interactive approval requests" } });
-      } catch {}
-      return;
+      wrapperPath = path.join(hookDirectory, "notify-wrapper.sh");
+      const wrapper = [
+        "#!/bin/sh",
+        `ELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath, "posix")} ${shellQuote(hookScript, "posix")} \"$@\"`,
+        "",
+      ].join("\n");
+      fs.writeFileSync(wrapperPath, wrapper, { encoding: "utf8", mode: 0o700 });
+      fs.chmodSync(wrapperPath, 0o700);
+      codexNotifyArgs = [wrapperPath, "codex"];
+      claudeHookCommand = wrapperPath;
+      buildClaudeHookArgs = (event) => ["claude", event];
     }
 
-    if (message?.id !== undefined && message.id !== null) {
-      const pending = pendingRequests.get(message.id);
-      if (!pending) return;
-      pendingRequests.delete(message.id);
-      clearTimeout(pending.timer);
-      if (message.error) pending.reject(new Error(message.error.message || `Codex app-serverの${pending.method}に失敗しました。`));
-      else pending.resolve(message.result || {});
-      return;
-    }
-
-    const params = message?.params || {};
-    if (message?.method === "thread/started") {
-      const id = params.thread?.id || params.threadId;
-      if (id) task.threadId = id;
-      broadcastTasks();
-    } else if (message?.method === "turn/started") {
-      task.appServerTurnId = params.turn?.id || task.appServerTurnId;
-      appendLog(task, "system", "Codex が作業を始めました");
-      releaseStartupOnce();
-    } else if (message?.method === "thread/tokenUsage/updated") {
-      updateThreadTokenUsage(task, params.tokenUsage || params.token_usage);
-    } else if (message?.method === "item/started") {
-      const item = params.item?.payload || params.item || {};
-      if (item.type === "commandExecution" || item.type === "command_execution") {
-        const command = Array.isArray(item.command) ? item.command.join(" ") : item.command;
-        if (command) appendLog(task, "system", `コマンド実行中: ${command}`);
-      }
-    } else if (message?.method === "item/completed") {
-      const item = params.item?.payload || params.item || {};
-      const text = extractAppServerItemText(item);
-      if (text) appendLog(task, item.type === "agentMessage" || item.type === "agent_message" ? "assistant" : item.type === "commandExecution" || item.type === "command_execution" ? "command" : "activity", text);
-    } else if (message?.method === "turn/completed") {
-      finishTurn(params.turn || params);
-    } else if (message?.method === "error") {
-      const errorText = params.error?.message || params.message;
-      if (errorText) appendLog(task, "error", errorText);
-    }
-  };
-
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    stdoutBuffer += chunk;
-    const lines = stdoutBuffer.split(/\r?\n/);
-    stdoutBuffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        handleMessage(JSON.parse(line));
-      } catch (error) {
-        appendLog(task, "notice", `Codex app-serverの応答を読み取れませんでした: ${error.message}`);
-      }
-    }
-  });
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => appendLog(task, "notice", chunk));
-  child.stdin.on("error", () => {});
-  child.on("error", (error) => {
-    clearTimeout(startupTimeout);
-    releaseStartupOnce();
-    clearPending(error);
-    if (task.child === child) {
-      task.child = null;
-      task.appServerMode = false;
-      markTaskStartupFailure(task, error);
-    }
-  });
-  child.on("close", (code) => {
-    clearTimeout(startupTimeout);
-    releaseStartupOnce();
-    clearPending(new Error("Codex app-serverが終了しました。"));
-    clearTimeout(task.appServerInterruptTimer);
-    task.appServerInterruptTimer = null;
-    if (task.child === child) {
-      task.child = null;
-      task.appServerMode = false;
-      task.appServerRequest = null;
-      task.appServerTurnId = null;
-      if (!task.appServerTurnFinished) {
-        task.exitCode = code;
-        task.status = task.stopRequested ? "stopped" : "failed";
-        task.endedAt = new Date().toISOString();
-        if (!task.stopRequested) appendLog(task, "error", `Codex app-server がターン完了前に終了しました (終了コード ${code ?? "不明"})。`);
-      }
-      broadcastTasks();
-    }
-    resolveExit?.();
-  });
-
-  const start = async () => {
-    await request("initialize", {
-      clientInfo: { name: "cimline", title: "CimLine", version: app.getVersion() },
-      capabilities: { experimentalApi: true },
-    });
-    send({ method: "initialized", params: {} });
-    const threadResponse = resume
-      ? await request("thread/resume", { threadId: task.threadId })
-      : await request("thread/start", {});
-    const threadId = threadResponse.thread?.id || threadResponse.threadId;
-    if (!task.threadId && !threadId) throw new Error("Codex app-serverから会話IDが返されませんでした。");
-    if (threadId) task.threadId = threadId;
-    const reviewer = threadResponse.approvalsReviewer ?? threadResponse.approvals_reviewer;
-    if (typeof reviewer !== "string") throw new Error("Codex app-serverの承認設定を確認できず、安全に開始できません。");
-    broadcastTasks();
-
-    const turnParams = {
-      threadId: task.threadId,
-      input: [{ type: "text", text: prompt }],
+    const settingsPath = path.join(hookDirectory, "claude-settings.json");
+    const claudeHook = (event) => ({ hooks: [{ type: "command", command: claudeHookCommand, args: buildClaudeHookArgs(event), timeout: 2 }] });
+    const settings = {
+      hooks: {
+        UserPromptSubmit: [claudeHook("running")],
+        Stop: [claudeHook("completed")],
+        Notification: ["permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"]
+          .map((matcher) => ({ matcher, ...claudeHook("approval") })),
+      },
     };
-    // `codex exec` uses the configured reviewer unless it is auto_review;
-    // in that case it forces headless approval to never. The workspace policy remains config-derived.
-    if (reviewer !== "auto_review") turnParams.approvalPolicy = "never";
-    turnStartSent = true;
-    const turnResponse = await request("turn/start", turnParams);
-    task.appServerTurnId = turnResponse.turn?.id || task.appServerTurnId;
-  };
-  start().catch((error) => {
-    if (!turnStartSent || !task.appServerTurnId) appendLog(task, "error", error.message || String(error));
-    releaseStartupOnce();
-    clearTimeout(startupTimeout);
-    terminateChildProcess(child);
-  });
-}
-
-function runCodexProcess(task, prompt, { resume = false } = {}) {
-  acquireCodexStartupLock().then((releaseStartup) => {
-    if (task.stopRequested || task.status !== "running") {
-      releaseStartup();
-      return;
-    }
-    task.startupLockRelease = releaseStartup;
-    try {
-      if (task.runner === "app-server") {
-        launchCodexAppServer(task, prompt, { resume, releaseStartup });
-      } else {
-        launchCodexExec(task, prompt, { resume, releaseStartup });
-      }
-    } catch (error) {
-      releaseStartup();
-      markTaskStartupFailure(task, error);
-    }
-  }).catch((error) => markTaskStartupFailure(task, error));
-}
-
-function startTask(input) {
-  const prompt = String(input.prompt || "").trim();
-  const rawCwd = String(input.cwd || "").trim();
-  if (!prompt) throw new Error("依頼文を入力してください。");
-  if (prompt.length > 20000) throw new Error("依頼文は20,000文字以内で入力してください。");
-  if (!rawCwd) throw new Error("作業フォルダーを入力してください。");
-  const cwd = path.resolve(rawCwd);
-  if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error("作業フォルダーが見つからないか、フォルダーではありません。");
-  requireCodexScript();
-
-  const task = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    title: String(input.title || prompt.replace(/\s+/g, " ").slice(0, 64)),
-    prompt,
-    cwd,
-    worktree: input.worktree === true,
-    runner: input.worktree === true || Object.prototype.hasOwnProperty.call(process.env, "CODEX_API_KEY") ? "exec" : "app-server",
-    usage: {
-      inputTokens: 0,
-      cachedInputTokens: 0,
-      cacheWriteInputTokens: 0,
-      outputTokens: 0,
-      reasoningOutputTokens: 0,
-      totalTokens: 0,
-      turns: 0,
-    },
-    status: "running",
-    startedAt: new Date().toISOString(),
-    endedAt: null,
-    threadId: null,
-    exitCode: null,
-    logs: [],
-    closed: false,
-    stdoutBuffer: "",
-    stderrBuffer: "",
-    stopRequested: false,
-    child: null,
-  };
-  tasks.set(task.id, task);
-  runCodexProcess(task, prompt);
-  return serializeTask(task);
-}
-
-async function continueTask(taskId, rawPrompt) {
-  const task = tasks.get(String(taskId));
-  if (!task) throw new Error("実行が見つかりません。");
-  if (["running", "stopping"].includes(task.status)) throw new Error("実行が完了してから会話を続けてください。");
-  if (!task.threadId) throw new Error("Codex の会話IDがまだ受信されていません。");
-  const prompt = String(rawPrompt || "").trim();
-  if (!prompt) throw new Error("追加の依頼文を入力してください。");
-  if (prompt.length > 20000) throw new Error("依頼文は20,000文字以内で入力してください。");
-  requireCodexScript();
-  if (task.appServerExitPromise) await task.appServerExitPromise;
-
-  task.status = "running";
-  task.endedAt = null;
-  task.exitCode = null;
-  task.stopRequested = false;
-  appendLog(task, "user", prompt);
-  runCodexProcess(task, prompt, { resume: true });
-  return serializeTask(task);
-}
-
-function stopTask(task, { force = false } = {}) {
-  if (!task || !["running", "stopping"].includes(task.status)) return serializeTask(task);
-  task.stopRequested = true;
-  task.status = "stopping";
-  appendLog(task, "system", "停止しています…");
-  if (task.appServerMode && task.child && !force && task.appServerRequest && task.threadId && task.appServerTurnId) {
-    task.appServerRequest("turn/interrupt", { threadId: task.threadId, turnId: task.appServerTurnId }).catch(() => {});
-    clearTimeout(task.appServerInterruptTimer);
-    task.appServerInterruptTimer = setTimeout(() => terminateChildProcess(task.child), APP_SERVER_INTERRUPT_TIMEOUT_MS);
-  } else if (task.child) {
-    terminateChildProcess(task.child);
-  } else {
-    releaseTaskStartupLock(task);
-    task.status = "stopped";
-    task.endedAt = new Date().toISOString();
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), { encoding: "utf8", mode: 0o600 });
+    try { fs.chmodSync(settingsPath, 0o600); } catch {}
+    return { settingsPath, codexNotifyArgs };
+  } catch (error) {
+    console.warn("セッション専用hookを作成できませんでした:", error?.message || error);
+    return null;
   }
-  broadcastTasks();
-  return serializeTask(task);
 }
 
-function setTaskClosed(taskId, closed) {
-  const task = tasks.get(String(taskId));
-  if (!task) throw new Error("実行が見つかりません。");
-  task.closed = closed;
-  broadcastTasks();
-  return serializeTask(task);
+function resolveCliCommand(cli) {
+  const override = cli === "codex" ? process.env.CIMLINE_CODEX_CMD : process.env.CIMLINE_CLAUDE_CMD;
+  if (override && override.trim()) return { file: override.trim(), args: [] };
+  if (cli === "codex") {
+    const codexScript = resolveCodexScript();
+    if (codexScript) return { file: getNodeBinary(), args: [codexScript] };
+    return { file: "codex", args: [] };
+  }
+  return { file: "claude", args: [] };
+}
+
+function isCliAvailable(cli) {
+  const command = resolveCliCommand(cli);
+  if (resolveOnPath(command.file)) return true;
+  return cli === "codex" && command.args.length > 0 && fs.existsSync(command.args[0]);
+}
+
+function getShellInfo() {
+  if (process.platform === "win32") {
+    const override = process.env.CIMLINE_SHELL?.trim();
+    const shellPath = override
+      ? resolveOnPath(override) || override
+      : resolveOnPath("pwsh.exe") || resolveOnPath("pwsh") || resolveOnPath("powershell.exe") || path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const baseName = path.basename(shellPath).toLowerCase();
+    return { file: shellPath, args: ["-NoLogo", "-NoExit"], kind: /^(pwsh|powershell)(\.exe)?$/.test(baseName) ? "powershell" : "posix" };
+  }
+  const override = process.env.CIMLINE_SHELL?.trim();
+  const shellPath = override || process.env.SHELL || (fs.existsSync("/bin/zsh") ? "/bin/zsh" : "/bin/bash");
+  return { file: shellPath, args: ["-l"], kind: "posix" };
+}
+
+function buildLaunchCommand(session, resume, shellKind, hooks) {
+  const cli = resolveCliCommand(session.cli);
+  const args = [...cli.args];
+  if (session.cli === "codex" && hooks?.codexNotifyArgs?.length) {
+    args.push("-c", "notify=" + JSON.stringify(hooks.codexNotifyArgs));
+  } else if (session.cli === "claude" && hooks?.settingsPath) {
+    args.push("--settings", hooks.settingsPath);
+  }
+  if (resume) args.push(...(session.cli === "codex" ? ["resume", "--last"] : ["--continue"]));
+  const command = [shellQuote(cli.file, shellKind), ...args.map((argument) => shellQuote(argument, shellKind))].join(" ");
+  const directory = shellQuote(session.cwd, shellKind);
+  if (shellKind === "powershell") return "Set-Location -LiteralPath " + directory + "; & " + command;
+  return "cd -- " + directory + " && " + command;
+}
+
+function appendPtyBuffer(session, data) {
+  const combined = session.buffer + data;
+  const bytes = Buffer.from(combined, "utf8");
+  if (bytes.byteLength <= MAX_PTY_BUFFER_BYTES) {
+    session.buffer = combined;
+    session.bufferBytes = bytes.byteLength;
+  } else {
+    session.buffer = bytes.subarray(bytes.byteLength - MAX_PTY_BUFFER_BYTES).toString("utf8").replace(/^\uFFFD/, "");
+    session.bufferBytes = Buffer.byteLength(session.buffer, "utf8");
+  }
+  session.sequence += 1;
+}
+
+function sendPtyEvent(channel, payload) {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send(channel, payload);
+  }
+}
+
+function detectNonEmptyEnter(session, data) {
+  let line = session.inputLine || "";
+  let submitted = false;
+  for (let index = 0; index < data.length; index += 1) {
+    const character = data[index];
+    if (character === "\r" || character === "\n") {
+      if (line.trim()) submitted = true;
+      line = "";
+      if (character === "\r" && data[index + 1] === "\n") index += 1;
+    } else if (character === "\u0008" || character === "\u007f") {
+      line = line.slice(0, -1);
+    } else if (character === "\u0003" || character === "\u0015") {
+      line = "";
+    } else if (character >= " " && character !== "\u007f") {
+      line += character;
+      if (line.length > MAX_INPUT_LINE_CHARS) line = line.slice(-MAX_INPUT_LINE_CHARS);
+    }
+  }
+  session.inputLine = line;
+  return submitted;
+}
+
+function startPty(session, resume = false) {
+  const shell = getShellInfo();
+  const hooks = ensureSessionHooks(session);
+  const environment = { ...process.env, TERM: "xterm-256color" };
+  if (notifyUrl && notifyToken) {
+    environment.CIMLINE_SESSION_ID = session.id;
+    environment.CIMLINE_NOTIFY_URL = notifyUrl;
+    environment.CIMLINE_NOTIFY_TOKEN = notifyToken;
+  }
+  const terminal = pty.spawn(shell.file, shell.args, {
+    name: "xterm-256color",
+    cols: 100,
+    rows: 28,
+    cwd: session.cwd,
+    env: environment,
+  });
+  livePtys.set(session.id, terminal);
+  session.closed = false;
+  session.status = "idle";
+  session.statusAt = new Date().toISOString();
+  session.unreviewed = false;
+  session.inputLine = "";
+  updateUnreviewedBadge();
+  terminal.onData((data) => {
+    if (!sessions.has(session.id)) return;
+    appendPtyBuffer(session, data);
+    sendPtyEvent("pty:data", { sessionId: session.id, data, sequence: session.sequence });
+  });
+  terminal.onExit(({ exitCode, signal }) => {
+    livePtys.delete(session.id);
+    const current = sessions.get(session.id);
+    if (current) {
+      current.closed = true;
+      current.inputLine = "";
+      setSessionStatus(current, "exited", { broadcast: false });
+      broadcastSessions();
+    }
+    sendPtyEvent("pty:exit", { sessionId: session.id, exitCode, signal });
+  });
+  scheduleSessionSave();
+  const launchCommand = buildLaunchCommand(session, resume, shell.kind, hooks);
+  const startupTimer = setTimeout(() => {
+    if (livePtys.get(session.id) === terminal) terminal.write(launchCommand + "\r");
+  }, 180);
+  startupTimer.unref?.();
+  return terminal;
+}
+
+function readPosixDescendants(rootPid) {
+  try {
+    const output = execFileSync("ps", ["-axo", "pid=,ppid="], { encoding: "utf8", timeout: 3000, windowsHide: true });
+    const children = new Map();
+    for (const line of output.split(/\r?\n/)) {
+      const match = line.trim().match(/^(\d+)\s+(\d+)$/);
+      if (!match) continue;
+      const pid = Number(match[1]);
+      const ppid = Number(match[2]);
+      if (!children.has(ppid)) children.set(ppid, []);
+      children.get(ppid).push(pid);
+    }
+    const descendants = [];
+    const visit = (parent) => {
+      for (const child of children.get(parent) || []) { visit(child); descendants.push(child); }
+    };
+    visit(rootPid);
+    return descendants;
+  } catch {
+    return [];
+  }
+}
+
+function signalProcess(pid, signal) {
+  try { process.kill(pid, signal); } catch (error) { if (error?.code !== "ESRCH") throw error; }
+}
+
+async function stopPtyTree(terminal) {
+  if (!terminal) return;
+  const pid = terminal.pid;
+  if (process.platform === "win32") {
+    await new Promise((resolve) => {
+      let settled = false;
+      let terminalKillTimer = null;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (terminalKillTimer) clearTimeout(terminalKillTimer);
+        try { terminal.kill(); } catch {}
+        resolve();
+      };
+      const taskkill = resolveOnPath("taskkill.exe") || "taskkill.exe";
+      try {
+        const child = execFile(taskkill, ["/PID", String(pid), "/T", "/F"], { windowsHide: true, timeout: 1500 }, () => finish());
+        child.once("spawn", () => {
+          terminalKillTimer = setTimeout(() => {
+            try { terminal.kill(); } catch {}
+          }, 100);
+        });
+        child.once("error", finish);
+      } catch {
+        finish();
+      }
+    });
+    return;
+  }
+  const descendants = readPosixDescendants(pid);
+  for (const childPid of descendants) { try { signalProcess(childPid, "SIGTERM"); } catch {} }
+  try { signalProcess(pid, "SIGTERM"); } catch {}
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  for (const childPid of descendants) { try { signalProcess(childPid, "SIGKILL"); } catch {} }
+  try { signalProcess(pid, "SIGKILL"); } catch {}
+  try { terminal.kill(); } catch {}
+}
+
+function validateDirectory(cwd) {
+  if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 32768 || !path.isAbsolute(cwd)) throw new Error("有効な作業フォルダーを選択してください。");
+  const absolute = path.resolve(cwd);
+  let stats;
+  try { stats = fs.statSync(absolute); } catch { throw new Error("選択したフォルダーが見つかりません。"); }
+  if (!stats.isDirectory()) throw new Error("作業フォルダーを指定してください。");
+  return absolute;
+}
+
+function createSession(input) {
+  const cwd = validateDirectory(input?.cwd);
+  const cli = input?.cli === "codex" || input?.cli === "claude" ? input.cli : null;
+  if (!cli) throw new Error("Claude CodeまたはCodexを選択してください。");
+  const session = {
+    id: randomUUID(),
+    title: path.basename(cwd) || cwd,
+    cwd,
+    cli,
+    closed: true,
+    createdAt: new Date().toISOString(),
+    status: "idle",
+    statusAt: new Date().toISOString(),
+    unreviewed: false,
+    buffer: "",
+    bufferBytes: 0,
+    sequence: 0,
+    inputLine: "",
+  };
+  sessions.set(session.id, session);
+  try {
+    startPty(session, false);
+  } catch (error) {
+    sessions.delete(session.id);
+    throw new Error("ターミナルを起動できませんでした: " + (error?.message || error));
+  }
+  broadcastSessions();
+  return serializeSession(session);
+}
+
+async function closeSession(sessionId) {
+  const session = sessions.get(String(sessionId));
+  if (!session) throw new Error("セッションが見つかりません。");
+  session.closed = true;
+  session.inputLine = "";
+  setSessionStatus(session, "exited", { broadcast: false });
+  scheduleSessionSave();
+  const terminal = livePtys.get(session.id);
+  if (terminal) await stopPtyTree(terminal);
+  if (livePtys.get(session.id) === terminal) livePtys.delete(session.id);
+  broadcastSessions();
+  return serializeSession(session);
+}
+
+function reopenSession(sessionId) {
+  const session = sessions.get(String(sessionId));
+  if (!session) throw new Error("セッションが見つかりません。");
+  if (livePtys.has(session.id)) return serializeSession(session);
+  session.buffer = "";
+  session.bufferBytes = 0;
+  session.sequence = 0;
+  session.inputLine = "";
+  try {
+    startPty(session, true);
+  } catch (error) {
+    session.closed = true;
+    setSessionStatus(session, "exited", { broadcast: false });
+    broadcastSessions();
+    throw new Error("ターミナルを再開できませんでした: " + (error?.message || error));
+  }
+  broadcastSessions();
+  return serializeSession(session);
+}
+
+function deleteSession(sessionId) {
+  const session = sessions.get(String(sessionId));
+  if (!session) return false;
+  const terminal = livePtys.get(session.id);
+  livePtys.delete(session.id);
+  sessions.delete(session.id);
+  if (focusedSessionId === session.id) focusedSessionId = null;
+  try {
+    const safeId = Buffer.from(session.id, "utf8").toString("base64url") || "session";
+    fs.rmSync(path.join(app.getPath("userData"), "hooks", safeId), { recursive: true, force: true });
+  } catch {}
+  if (terminal) void stopPtyTree(terminal);
+  updateUnreviewedBadge();
+  broadcastSessions();
+  return true;
+}
+
+function attachPty(sessionId) {
+  const session = sessions.get(String(sessionId));
+  if (!session) throw new Error("セッションが見つかりません。");
+  return { buffer: session.buffer, sequence: session.sequence };
+}
+
+function writePty(sessionId, data) {
+  const id = String(sessionId);
+  const terminal = livePtys.get(id);
+  if (!terminal) throw new Error("ターミナルは閉じています。");
+  if (typeof data !== "string" || data.length > MAX_PTY_WRITE_CHARS) throw new Error("ターミナル入力が無効です。");
+  terminal.write(data);
+  const session = sessions.get(id);
+  if (session && detectNonEmptyEnter(session, data)) setSessionStatus(session, "running");
+  return true;
+}
+
+function resizePty(sessionId, columns, rows) {
+  const terminal = livePtys.get(String(sessionId));
+  if (!terminal) return false;
+  const cols = Number.isInteger(columns) ? Math.min(500, Math.max(2, columns)) : null;
+  const lines = Number.isInteger(rows) ? Math.min(300, Math.max(2, rows)) : null;
+  if (cols === null || lines === null) throw new Error("ターミナルのサイズが無効です。");
+  terminal.resize(cols, lines);
+  return true;
+}
+
+function readClipboardText() {
+  return clipboard.readText().slice(0, MAX_CLIPBOARD_CHARS);
+}
+
+function writeClipboardText(text) {
+  if (typeof text !== "string" || text.length > MAX_CLIPBOARD_CHARS) throw new Error("クリップボードのテキストが無効です。");
+  clipboard.writeText(text);
+  return true;
 }
 
 function registerIpc() {
   ipcMain.handle("app:get-state", () => ({
-    tasks: [...tasks.values()].map(serializeTask),
-    cliAvailable: Boolean(resolveCodexScript()),
-    defaultDirectory: process.env.CODEX_DEFAULT_PROJECT || (app.isPackaged ? app.getPath("documents") : process.cwd()),
+    sessions: serializeSessions(),
+    cliAvailable: { codex: isCliAvailable("codex"), claude: isCliAvailable("claude") },
+    defaultDirectory: process.env.CIMLINE_DEFAULT_PROJECT || process.env.CODEX_DEFAULT_PROJECT || (app.isPackaged ? app.getPath("documents") : process.cwd()),
   }));
-
   ipcMain.handle("usage:get-rate-limits", () => getCodexRateLimits());
   ipcMain.handle("skills:list", (_event, projectPaths) => getSkills(projectPaths));
-
   ipcMain.handle("dialog:choose-folder", async () => {
     const options = {
       title: "作業フォルダーを選択",
-      defaultPath: process.env.CODEX_DEFAULT_PROJECT || (app.isPackaged ? app.getPath("documents") : process.cwd()),
+      defaultPath: process.env.CIMLINE_DEFAULT_PROJECT || process.env.CODEX_DEFAULT_PROJECT || (app.isPackaged ? app.getPath("documents") : process.cwd()),
       properties: ["openDirectory", "createDirectory"],
     };
     const owner = BrowserWindow.getFocusedWindow();
     const result = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
     return result.canceled ? null : result.filePaths[0] || null;
   });
-
-  ipcMain.handle("tasks:create", (_event, input) => startTask(input || {}));
-  ipcMain.handle("tasks:continue", (_event, id, prompt) => continueTask(id, prompt));
-  ipcMain.handle("tasks:stop", (_event, id) => {
-    const task = tasks.get(String(id));
-    if (!task) throw new Error("実行が見つかりません。");
-    return stopTask(task);
-  });
-  ipcMain.handle("tasks:stop-all", () => {
-    for (const task of tasks.values()) stopTask(task);
-    return true;
-  });
-  ipcMain.handle("tasks:close", (_event, id) => setTaskClosed(id, true));
-  ipcMain.handle("tasks:reopen", (_event, id) => setTaskClosed(id, false));
-  ipcMain.handle("tasks:delete", (_event, id) => {
-    const task = tasks.get(String(id));
-    if (!task) return false;
-    if (["running", "stopping"].includes(task.status)) throw new Error("実行中の依頼は削除できません。");
-    tasks.delete(task.id);
-    broadcastTasks();
-    return true;
-  });
+  ipcMain.handle("sessions:create", (_event, input) => createSession(input || {}));
+  ipcMain.handle("sessions:close", (_event, id) => closeSession(id));
+  ipcMain.handle("sessions:reopen", (_event, id) => reopenSession(id));
+  ipcMain.handle("sessions:delete", (_event, id) => deleteSession(id));
+  ipcMain.handle("sessions:focus", (_event, id) => focusSession(id));
+  ipcMain.handle("pty:attach", (_event, id) => attachPty(id));
+  ipcMain.handle("pty:write", (_event, id, data) => writePty(id, data));
+  ipcMain.handle("pty:resize", (_event, id, columns, rows) => resizePty(id, columns, rows));
+  ipcMain.handle("clipboard:read-text", () => readClipboardText());
+  ipcMain.handle("clipboard:write-text", (_event, text) => writeClipboardText(text));
 }
 
 function isAppUrl(url) {
   try {
     const parsed = new URL(url);
-    if (!app.isPackaged && process.argv.includes("--dev")) return parsed.origin === "http://127.0.0.1:5173";
+    if (!app.isPackaged && process.argv.includes("--dev")) return parsed.origin === new URL(DEV_SERVER_URL).origin;
     if (parsed.protocol !== "file:") return false;
     return path.resolve(fileURLToPath(parsed)).toLowerCase() === path.resolve(app.getAppPath(), "dist", "index.html").toLowerCase();
   } catch {
@@ -1727,7 +1715,6 @@ function createWindow() {
       sandbox: true,
     },
   });
-
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("https://") || url.startsWith("http://")) shell.openExternal(url);
     return { action: "deny" };
@@ -1738,13 +1725,14 @@ function createWindow() {
       if (url.startsWith("https://") || url.startsWith("http://")) shell.openExternal(url);
     }
   });
-
-  if (!app.isPackaged && process.argv.includes("--dev")) window.loadURL("http://127.0.0.1:5173");
+  if (!app.isPackaged && process.argv.includes("--dev")) window.loadURL(DEV_SERVER_URL);
   else window.loadFile(path.join(app.getAppPath(), "dist", "index.html"));
 }
 
-app.whenReady().then(() => {
-  loadPersistedTasks();
+app.whenReady().then(async () => {
+  loadPersistedSessions();
+  try { await startNotifyServer(); }
+  catch (error) { console.warn("状態通知サーバーを起動できませんでした:", error?.message || error); }
   registerIpc();
   createWindow();
   app.on("activate", () => {
@@ -1757,9 +1745,20 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (quitFlushStarted) return;
   quitFlushStarted = true;
-  for (const task of tasks.values()) stopTask(task, { force: true });
-  flushTaskSave()
-    .catch((error) => console.error("終了前にタスク履歴を保存できませんでした:", error))
+  const stops = [...livePtys.values()].map((terminal) => stopPtyTree(terminal));
+  livePtys.clear();
+  for (const session of sessions.values()) {
+    session.closed = true;
+    session.inputLine = "";
+    session.status = "exited";
+    session.statusAt = new Date().toISOString();
+    session.unreviewed = false;
+  }
+  updateUnreviewedBadge();
+  stopNotifyServer();
+  Promise.allSettled(stops)
+    .then(() => flushSessionSave())
+    .catch((error) => console.error("終了前にセッション履歴を保存できませんでした:", error))
     .finally(() => {
       quitFlushComplete = true;
       app.quit();

@@ -1,39 +1,67 @@
 # CimLine
 
-Windows 向けの Codex CLI 管理デスクトップアプリです。Electron のウィンドウに React と shadcn/ui の画面を表示し、複数の Codex ターミナルを2列で並べます。初回起動時に依頼がなければ入力モーダルを開き、各ターミナルから個別の会話を続けられます。
+CimLine is a desktop workspace for running Claude Code and Codex CLI in real, independent terminal sessions. Each pane uses `node-pty` and xterm.js, so input, approval prompts, and CLI slash commands behave as they do in a regular shell. The dashboard keeps a two-column layout, searchable session history, recently used folders, and drag-and-drop ordering.
 
-使用量ダイアログでは、まず Codex アカウントの5時間枠と週間枠について、使用済み割合とリセット時刻を表示します。その下に、このアプリで実行した Codex スレッドごとの累積 total/input/output tokens を表示します。トークン数は Codex が返す使用量を集計します。app-server 方式は usage 通知ごとに更新し、Git worktree または `CODEX_API_KEY` を使う `codex exec --json` 方式は、usage を含むターン完了イベントを受け取った時点で反映します。Codex アカウント利用枠 API は正確な残りトークン数を返さず使用済み割合を返すため、利用枠は割合で表示します。
+The app also shows Codex account usage limits (5-hour and weekly windows) and lists locally available Codex skills. Those features use the installed Codex CLI configuration; the app does not store API keys or credentials in the project.
 
-サイドバーの「スキル」から、ユーザー (`~/.agents/skills`)、プロジェクト (`<project>/.agents/skills`)、Codex system (`CODEX_HOME/skills/.system`)、`CODEX_HOME/skills`、およびプラグインキャッシュ (`CODEX_HOME/plugins/cache/{marketplace}/{plugin}/{version}/`) にあるスキルを参照できます。プラグインは `plugin.json` または `.codex-plugin/plugin.json` の `skills` 相対パス（文字列または文字列配列）に従い、未指定なら従来の `skills/` フォルダーを参照します。配置形式は[Codex plugin documentation](https://developers.openai.com/plugins/build/plugins)に従います。この画面は一覧表示のみで、スキルのインストールや変更は行いません。完了した依頼は同じ Codex スレッドで続けられます。
+## Requirements
 
-## 起動
+- Node.js 24 or later
+- Windows or macOS
+- At least one CLI installed and authenticated: `codex` or `claude`
+- PowerShell (`pwsh`, with `powershell.exe` as fallback) on Windows, or a login shell on macOS
 
-必要なもの:
-
-- Node.js 24 以降
-- Codex CLI のインストールとログイン
+## Development
 
 ```powershell
 npm install
 npm run dev
 ```
 
-## Windows インストーラー
+On macOS, run the same commands from a terminal. If a change affects `electron/main.cjs` or `electron/preload.cjs`, fully stop and restart the app; Vite hot reload only updates the renderer.
+
+## Build installers
 
 ```powershell
 npm run package:win
 ```
 
-生成物は `release` フォルダーに出力されます。
+On macOS:
 
-## Codex CLI の場所
-
-アプリは npm グローバルインストールの `@openai/codex/bin/codex.js` を検索します。標準の Windows npm 配置先は `%APPDATA%\npm\node_modules\@openai\codex\bin\codex.js` です。別の場所を使っている場合は起動前に環境変数で指定できます。
-
-```powershell
-$env:CODEX_CLI_JS = "C:\path\to\codex.js"
-$env:CODEX_NODE_EXE = "C:\Program Files\nodejs\node.exe"
-npm run dev
+```sh
+npm run package:mac
 ```
 
-実行時はインストール済み Codex CLI のログイン状態、設定、承認ルール、サンドボックスをそのまま使用します。必要なら各依頼で Git worktree を有効にして作業を分離できます。ターミナルを閉じても依頼と会話ログは履歴に残り、あとからターミナルを再表示して同じCodex会話を続けられます。履歴はElectronのユーザーデータ領域に保存します。アプリ終了時に実行中の依頼は停止し、次回起動後に履歴から再開できます。最近のフォルダーはアプリ内に保存します。
+Installers are written to `release/`. `node-pty` is a native dependency and is unpacked from the Electron archive. If its binary needs to be rebuilt for the local Electron version, run:
+
+```sh
+npm run rebuild:native
+```
+
+## CLI and shell selection
+
+The app detects `codex` and `claude` on `PATH` by default. Set these environment variables before launching CimLine to override detection or select a shell:
+
+| Variable | Purpose |
+| --- | --- |
+| `CIMLINE_SHELL` | Shell executable to use for sessions |
+| `CIMLINE_CODEX_CMD` | Codex command name or path |
+| `CIMLINE_CLAUDE_CMD` | Claude Code command name or path |
+| `CIMLINE_DEFAULT_PROJECT` | Initial folder; `CODEX_DEFAULT_PROJECT` is also accepted |
+| `CODEX_CLI_JS` / `CODEX_NODE_EXE` | Codex CLI script and Node executable for account usage and skill discovery |
+
+Windows defaults to PowerShell 7 (`pwsh`) and falls back to Windows PowerShell. macOS uses the user's login shell and falls back to `/bin/zsh`. CimLine starts the selected CLI in the chosen folder. New sessions launch the CLI normally; reopening a session runs `codex resume --last` or `claude --continue` in that folder.
+
+## Session history
+
+Closing a pane stops its shell process tree but keeps the folder, CLI choice, and session metadata in `sessions.json` under Electron's user-data directory. Closed sessions stay in history and can be reopened or deleted. Active PTYs end when CimLine exits; they are not background jobs. Reopening starts a fresh shell and asks the selected CLI to continue its latest conversation.
+
+## Session status and notifications
+
+Pane status is tracked as idle, running, completed, approval-waiting, or exited. Claude Code reports prompt, completion, permission, and user-input events through a per-session settings file in CimLine's user-data directory. Codex reports completed turns through a per-run `notify` override; submitted non-empty terminal input marks a Codex pane as running. CimLine never edits `~/.claude/settings.json` or `~/.codex/config.toml`.
+
+Hooks send only the pane ID and event name to a random-port HTTP listener bound to `127.0.0.1`. A per-launch random token, active-session check, and 8 KB request limit protect that listener. Hook stdin and Codex event text are discarded; prompts and terminal output are not written to session history. A completion or permission request in an unfocused pane is highlighted and counted until the pane is focused. The app also shows an OS notification when it is in the background.
+
+## Skills and plugins
+
+Codex CLI remains responsible for interactive `/` commands and `$` skill invocations inside a Codex terminal. CimLine's Skills view reads the local Codex skill and plugin cache for browsing. Account usage displays the 5-hour and weekly rate-limit windows reported by the Codex account API; the API reports used percentages and reset times, not a remaining-token count.

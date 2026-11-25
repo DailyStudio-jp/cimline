@@ -1,1045 +1,655 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 import {
   Activity,
-  ArrowDown,
-  ArrowUpRight,
+  AlertCircle,
   Check,
   CircleDot,
-  Copy,
-  Eye,
-  EyeOff,
+  Code2,
   Folder,
   FolderOpen,
-  GitBranch,
-  LayoutDashboard,
   LoaderCircle,
   Plus,
   RefreshCw,
   Search,
-  ShieldCheck,
   Sparkles,
-  Terminal,
-  Square,
+  Terminal as TerminalIcon,
   Trash2,
   X,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { TerminalPane, type TerminalSession } from "@/components/TerminalPane";
+import type { SessionStatus } from "@/vite-env";
 import { Separator } from "@/components/ui/separator";
-import { Textarea } from "@/components/ui/textarea";
-import type { CodexRateLimits, RunTask } from "@/vite-env";
 
-type Project = { path: string; name: string };
-type SkillItem = { name: string; description: string; scope: "user" | "project" | "system" | "plugin" | "codex-home"; path: string; projectPath?: string };
-
-const projectStorageKey = "codex-run-desk-projects";
-const taskOrderStorageKey = "codex-run-desk-task-order";
-const reviewedTaskStorageKey = "codex-run-desk-reviewed-tasks";
-const operationalLogVisibilityStorageKey = "codex-run-desk-operational-log-visibility";
-const statusText: Record<RunTask["status"], string> = {
-  running: "実行中",
-  stopping: "停止中",
-  completed: "完了",
-  failed: "エラー",
-  stopped: "停止",
+type CliKind = "codex" | "claude";
+type RateWindow = { usedPercent: number; windowDurationMins: number | null; resetsAt: number | null };
+type RateLimits = { primary: RateWindow | null; secondary: RateWindow | null };
+type Skill = { name: string; description: string; scope: "user" | "project" | "system" | "plugin" | "codex-home"; path: string; projectPath?: string };
+type SkillResult = { skills: Skill[]; warnings: string[] };
+type AppState = { sessions: TerminalSession[]; cliAvailable: { codex: boolean; claude: boolean }; defaultDirectory: string };
+type CimLineBridge = {
+  getState?: () => Promise<AppState>;
+  chooseFolder?: () => Promise<string | null>;
+  createSession?: (input: { cwd: string; cli: CliKind }) => Promise<TerminalSession>;
+  closeSession?: (id: string) => Promise<unknown>;
+  reopenSession?: (id: string) => Promise<TerminalSession>;
+  deleteSession?: (id: string) => Promise<boolean>;
+  onSessionsUpdated?: (callback: (sessions: TerminalSession[]) => void) => () => void;
+  setFocusedSession?: (id: string | null) => Promise<unknown>;
+  getRateLimits?: () => Promise<RateLimits>;
+  getSkills?: (projectPaths: string[]) => Promise<SkillResult>;
 };
+type RecentFolder = { path: string; name: string };
+const recentFolderStorageKey = "cimline-recent-folders";
+const sessionOrderStorageKey = "cimline-session-order";
+const lastCliStorageKey = "cimline-last-cli";
 
-function loadProjects(): Project[] {
+function bridge(): CimLineBridge {
+  return (window.codexDesk || {}) as unknown as CimLineBridge;
+}
+
+function readJson<T>(key: string, fallback: T): T {
   try {
-    const value = JSON.parse(localStorage.getItem(projectStorageKey) || "[]");
-    return Array.isArray(value) ? value : [];
+    const value = localStorage.getItem(key);
+    return value ? JSON.parse(value) as T : fallback;
   } catch {
-    return [];
+    return fallback;
   }
 }
 
-function loadStoredIds(key: string): string[] {
-  try {
-    const value = JSON.parse(localStorage.getItem(key) || "[]");
-    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function loadOperationalLogVisibility(): Record<string, boolean> {
-  try {
-    const value = JSON.parse(localStorage.getItem(operationalLogVisibilityStorageKey) || "{}");
-    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-    return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean"));
-  } catch {
-    return {};
-  }
-}
-
-function getFolderName(folderPath: string) {
-  const normalized = folderPath.replace(/[\\/]+$/, "");
+function folderName(value: string) {
+  const normalized = value.replace(/[\\/]+$/, "");
   return normalized.split(/[\\/]/).pop() || normalized || "フォルダー";
 }
 
-function timeLabel(value: string | null) {
-  if (!value) return "—";
-  return new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+function cliName(cli: CliKind) {
+  return cli === "codex" ? "Codex CLI" : "Claude Code";
 }
 
-function durationLabel(task: RunTask, now: number) {
-  const start = new Date(task.startedAt).getTime();
-  const end = task.endedAt ? new Date(task.endedAt).getTime() : now;
-  const seconds = Math.max(0, Math.floor((end - start) / 1000));
-  if (seconds < 60) return `${seconds}秒`;
-  return `${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, "0")}秒`;
+function errorText(error: unknown) {
+  return (error instanceof Error ? error.message : String(error || "不明なエラー"))
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\b(?:sk|sess|rk)-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
+    .replace(/[\r\n\t]+/g, " ")
+    .slice(0, 320);
 }
 
-function shortText(value: string, length = 110) {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  return normalized.length > length ? `${normalized.slice(0, length)}…` : normalized;
-}
-
-function numberLabel(value: number) {
-  return new Intl.NumberFormat("ja-JP").format(value || 0);
-}
-
-function rateWindowLabel(windowMinutes: number | null) {
-  if (!windowMinutes) return "利用枠";
-  if (windowMinutes >= 10000) return "週間枠";
-  if (windowMinutes >= 300) return `${Math.round(windowMinutes / 60)}時間枠`;
-  if (windowMinutes >= 60) return `${Math.round(windowMinutes / 60)}時間枠`;
-  return `${windowMinutes}分枠`;
-}
-
-function resetTimeLabel(timestamp: number | null) {
-  if (!timestamp) return null;
+function resetLabel(timestamp: number | null) {
+  if (!timestamp) return "リセット時刻不明";
   return new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp * 1000));
 }
 
-function terminalPrefix(kind: RunTask["logs"][number]["kind"]) {
-  return ({ user: "あなた", assistant: "Codex", command: "コマンド", activity: "操作", system: "状態", notice: "通知", error: "エラー" } as Record<string, string>)[kind] || "ログ";
+function windowLabel(window: RateWindow) {
+  if (window.windowDurationMins && window.windowDurationMins >= 10000) return "週間枠";
+  if (window.windowDurationMins && window.windowDurationMins >= 300) return "5時間枠";
+  return "利用枠";
 }
 
-function statusBadge(task: RunTask) {
-  return (
-    <Badge variant="outline" className={`state-badge state-${task.status}`}>
-      {task.status === "running" ? <span className="status-dot is-pulsing" /> : task.status === "completed" ? <Check size={11} /> : <span className="status-dot" />}
-      {statusText[task.status]}
-    </Badge>
-  );
+function loadRecentFolders() {
+  const value = readJson<RecentFolder[]>(recentFolderStorageKey, []);
+  return Array.isArray(value) ? value.filter((item) => item && typeof item.path === "string").slice(0, 8) : [];
+}
+
+function isSessionStatus(value: unknown): value is SessionStatus {
+  return value === "idle" || value === "running" || value === "completed" || value === "approval" || value === "exited";
+}
+
+function normalizeSessions(value: unknown): TerminalSession[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((valueItem): TerminalSession[] => {
+    if (!valueItem || typeof valueItem !== "object") return [];
+    const item = valueItem as Record<string, unknown>;
+    if (typeof item.id !== "string" || typeof item.cwd !== "string" || (item.cli !== "codex" && item.cli !== "claude")) return [];
+    const closed = item.closed === true;
+    return [{
+      id: item.id,
+      title: typeof item.title === "string" ? item.title : folderName(item.cwd),
+      cwd: item.cwd,
+      cli: item.cli,
+      closed,
+      createdAt: typeof item.createdAt === "string" ? item.createdAt : new Date(0).toISOString(),
+      status: isSessionStatus(item.status) ? item.status : closed ? "exited" : "idle",
+      statusAt: typeof item.statusAt === "string" && !Number.isNaN(Date.parse(item.statusAt)) ? item.statusAt : null,
+      unreviewed: item.unreviewed === true,
+    }];
+  });
+}
+
+function sessionStatusLabel(status: SessionStatus) {
+  switch (status) {
+    case "running": return "実行中";
+    case "completed": return "完了";
+    case "approval": return "承認待ち";
+    case "exited": return "終了";
+    default: return "待機中";
+  }
+}
+
+function statusAgeLabel(statusAt: string | null, now: number) {
+  if (!statusAt) return "";
+  const timestamp = Date.parse(statusAt);
+  if (Number.isNaN(timestamp)) return "";
+  const elapsed = Math.max(0, now - timestamp);
+  if (elapsed < 60_000) return "たった今";
+  if (elapsed < 60 * 60_000) return `${Math.floor(elapsed / 60_000)}分前`;
+  if (elapsed < 24 * 60 * 60_000) return `${Math.floor(elapsed / (60 * 60_000))}時間前`;
+  return `${Math.floor(elapsed / (24 * 60 * 60_000))}日前`;
 }
 
 export default function App() {
-  const [tasks, setTasks] = useState<RunTask[]>([]);
-  const [tasksInitialized, setTasksInitialized] = useState(false);
-  const [taskOrder, setTaskOrder] = useState<string[]>(() => loadStoredIds(taskOrderStorageKey));
-  const [reviewedTaskIds, setReviewedTaskIds] = useState<string[]>(() => loadStoredIds(reviewedTaskStorageKey));
-  const [operationalLogVisibility, setOperationalLogVisibility] = useState<Record<string, boolean>>(loadOperationalLogVisibility);
-  const [autoFollowByTask, setAutoFollowByTask] = useState<Record<string, boolean>>({});
-  const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
-  const [dropTargetTaskId, setDropTargetTaskId] = useState<string | null>(null);
-  const [folderPath, setFolderPath] = useState(() => loadProjects()[0]?.path || "F:\\cimline");
-  const [prompt, setPrompt] = useState("");
-  const [followup, setFollowup] = useState("");
-  const [taskDrafts, setTaskDrafts] = useState<Record<string, string>>({});
-  const [continuingTaskIds, setContinuingTaskIds] = useState<string[]>([]);
-  const [useWorktree, setUseWorktree] = useState(false);
-  const [composerOpen, setComposerOpen] = useState(false);
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const [usageOpen, setUsageOpen] = useState(false);
-  const [skillsOpen, setSkillsOpen] = useState(false);
-  const [skillsLoading, setSkillsLoading] = useState(false);
-  const [skillsError, setSkillsError] = useState<string | null>(null);
-  const [skills, setSkills] = useState<SkillItem[]>([]);
-  const [skillWarnings, setSkillWarnings] = useState<string[]>([]);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<TerminalSession[]>([]);
+  const [sessionsInitialized, setSessionsInitialized] = useState(false);
+  const [cliAvailable, setCliAvailable] = useState<{ codex: boolean; claude: boolean }>({ codex: false, claude: false });
+  const [defaultDirectory, setDefaultDirectory] = useState("");
+  const [recentFolders, setRecentFolders] = useState<RecentFolder[]>(loadRecentFolders);
+  const [sessionOrder, setSessionOrder] = useState<string[]>(() => readJson<string[]>(sessionOrderStorageKey, []));
   const [search, setSearch] = useState("");
-  const [projects, setProjects] = useState<Project[]>(loadProjects);
-  const [cliAvailable, setCliAvailable] = useState<boolean | null>(null);
-  const [rateLimits, setRateLimits] = useState<CodexRateLimits | null>(null);
+  const [folderPath, setFolderPath] = useState("");
+  const [selectedCli, setSelectedCli] = useState<CliKind>(() => localStorage.getItem(lastCliStorageKey) === "claude" ? "claude" : "codex");
+  const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
+  const [statusClock, setStatusClock] = useState(() => Date.now());
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [skillWarnings, setSkillWarnings] = useState<string[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsError, setSkillsError] = useState("");
+  const [rateLimits, setRateLimits] = useState<RateLimits | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
-  const [rateLimitsError, setRateLimitsError] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [rateLimitsError, setRateLimitsError] = useState("");
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [workingSessionId, setWorkingSessionId] = useState<string | null>(null);
+  const [bridgeError, setBridgeError] = useState("");
   const [toast, setToast] = useState<{ message: string; error?: boolean } | null>(null);
-  const [now, setNow] = useState(Date.now());
-  const promptRef = useRef<HTMLTextAreaElement>(null);
-  const followupRef = useRef<HTMLTextAreaElement>(null);
+  const [draggingSessionId, setDraggingSessionId] = useState<string | null>(null);
+  const [dropTargetSessionId, setDropTargetSessionId] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-  const composerDialogRef = useRef<HTMLDialogElement>(null);
-  const detailsDialogRef = useRef<HTMLDialogElement>(null);
-  const usageDialogRef = useRef<HTMLDialogElement>(null);
-  const skillsDialogRef = useRef<HTMLDialogElement>(null);
+  const composerRef = useRef<HTMLDialogElement>(null);
+  const skillsRef = useRef<HTMLDialogElement>(null);
+  const usageRef = useRef<HTMLDialogElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const rateLimitsRequest = useRef(false);
-  const draggedTaskId = useRef<string | null>(null);
-  const dragAutoScrollFrame = useRef<number | null>(null);
-  const dragAutoScrollState = useRef<{ container: HTMLElement | Window; direction: -1 | 1; speed: number } | null>(null);
-  const terminalOutputRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const terminalScrollMetrics = useRef<Record<string, { scrollTop: number; scrollHeight: number; clientHeight: number }>>({});
+  const focusedSessionIdRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    const unsubscribe = window.codexDesk.onTasksUpdated(setTasks);
-    window.codexDesk.getState().then((state) => {
-      setTasks(state.tasks);
-      setTasksInitialized(true);
-      setCliAvailable(state.cliAvailable);
-      if (state.defaultDirectory && projects.length === 0) setFolderPath(state.defaultDirectory);
-      if (state.tasks.length === 0) setComposerOpen(true);
-    }).catch(() => { setCliAvailable(false); setTasksInitialized(true); setComposerOpen(true); });
-    return unsubscribe;
+  const notify = useCallback((message: string, error = false) => {
+    setToast({ message, error });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 3500);
+  }, []);
+
+  const focusSession = useCallback((sessionId: string) => {
+    focusedSessionIdRef.current = sessionId;
+    setFocusedSessionId(sessionId);
+    setSessions((current) => current.some((session) => session.id === sessionId && session.unreviewed)
+      ? current.map((session) => session.id === sessionId ? { ...session, unreviewed: false } : session)
+      : current);
+    const api = bridge();
+    if (typeof api.setFocusedSession === "function") void api.setFocusedSession(sessionId).catch(() => {});
+  }, []);
+
+  const refreshUsage = useCallback(async () => {
+    const api = bridge();
+    if (typeof api.getRateLimits !== "function") {
+      setRateLimitsError("利用枠APIがありません。CimLineを完全終了して再起動してください。");
+      return;
+    }
+    setRateLimitsLoading(true);
+    setRateLimitsError("");
+    try {
+      const result = await api.getRateLimits();
+      setRateLimits(result);
+    } catch (error) {
+      setRateLimitsError(errorText(error));
+    } finally {
+      setRateLimitsLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
+    let disposed = false;
+    const api = bridge();
+    if (typeof api.getState !== "function") {
+      setBridgeError("CimLineの画面とElectron本体の版がずれています。アプリを完全終了して再起動してください。");
+      setSessionsInitialized(true);
+      return;
+    }
+    const unsubscribe = api.onSessionsUpdated?.((next) => {
+      if (!disposed) setSessions(normalizeSessions(next));
+    });
+    void api.getState().then((state) => {
+      if (disposed) return;
+      const nextSessions = normalizeSessions(state.sessions);
+      setSessions(nextSessions);
+      setCliAvailable(state.cliAvailable || { codex: false, claude: false });
+      setDefaultDirectory(state.defaultDirectory || "");
+      setFolderPath((current) => current || state.defaultDirectory || recentFolders[0]?.path || "");
+      setSessionsInitialized(true);
+      if (nextSessions.length === 0) setComposerOpen(true);
+    }).catch((error) => {
+      if (disposed) return;
+      setBridgeError("セッション情報を読み込めません: " + errorText(error));
+      setSessionsInitialized(true);
+    });
+    void refreshUsage();
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+    };
   }, []);
 
-  useEffect(() => setFollowup(""), [selectedTaskId]);
+  useEffect(() => {
+    const timer = window.setInterval(() => setStatusClock(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
-    const dialog = composerDialogRef.current;
+    const dialog = composerRef.current;
     if (!dialog) return;
     if (composerOpen && !dialog.open) {
       dialog.showModal();
-      requestAnimationFrame(() => promptRef.current?.focus());
-    } else if (!composerOpen && dialog.open) {
-      dialog.close();
-    }
+      requestAnimationFrame(() => document.getElementById("new-session-folder")?.focus());
+    } else if (!composerOpen && dialog.open) dialog.close();
   }, [composerOpen]);
 
   useEffect(() => {
-    const dialog = detailsDialogRef.current;
-    if (!dialog) return;
-    const hasSelectedTask = tasks.some((task) => task.id === selectedTaskId);
-    if (detailsOpen && hasSelectedTask && !dialog.open) dialog.showModal();
-    else if ((!detailsOpen || !hasSelectedTask) && dialog.open) dialog.close();
-  }, [detailsOpen, selectedTaskId, tasks]);
-
-  useEffect(() => {
-    const dialog = usageDialogRef.current;
-    if (!dialog) return;
-    if (usageOpen && !dialog.open) dialog.showModal();
-    else if (!usageOpen && dialog.open) dialog.close();
-  }, [usageOpen]);
-
-  useEffect(() => {
-    const dialog = skillsDialogRef.current;
+    const dialog = skillsRef.current;
     if (!dialog) return;
     if (skillsOpen && !dialog.open) dialog.showModal();
     else if (!skillsOpen && dialog.open) dialog.close();
   }, [skillsOpen]);
 
   useEffect(() => {
-    const listener = (event: KeyboardEvent) => {
-      if (event.isComposing || event.keyCode === 229) return;
-      if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.altKey && !event.shiftKey) {
-        if (document.activeElement === promptRef.current && loading) return;
-        event.preventDefault();
-        if (document.activeElement === followupRef.current) {
-          followupRef.current?.closest("form")?.requestSubmit();
-          return;
-        }
-        const activeElement = document.activeElement;
-        const activeForm = activeElement instanceof HTMLElement ? activeElement.closest("form") : null;
-        if (activeForm && (activeForm.classList.contains("terminal-followup-form") || activeForm.closest(".composer-dialog"))) {
-          activeForm.requestSubmit();
-          return;
-        }
-        setComposerOpen(true);
-      } else if (event.key === "/" && !(document.activeElement instanceof HTMLInputElement) && !(document.activeElement instanceof HTMLTextAreaElement)) {
-        event.preventDefault();
-        searchRef.current?.focus();
-      }
-    };
-    window.addEventListener("keydown", listener);
-    return () => window.removeEventListener("keydown", listener);
-  }, [loading]);
-
-  useEffect(() => () => {
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    stopTaskAutoScroll();
-  }, []);
+    const dialog = usageRef.current;
+    if (!dialog) return;
+    if (usageOpen && !dialog.open) dialog.showModal();
+    else if (!usageOpen && dialog.open) dialog.close();
+  }, [usageOpen]);
 
   useEffect(() => {
-    if (!tasksInitialized) return;
-    const currentIds = new Set(tasks.map((task) => task.id));
-    const keptOrder = taskOrder.filter((id) => currentIds.has(id));
-    const addedOrder = tasks
-      .filter((task) => !keptOrder.includes(task.id))
-      .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
-      .map((task) => task.id);
-    const nextOrder = [...keptOrder, ...addedOrder];
-    if (nextOrder.length !== taskOrder.length || nextOrder.some((id, index) => id !== taskOrder[index])) {
-      setTaskOrder(nextOrder);
-      localStorage.setItem(taskOrderStorageKey, JSON.stringify(nextOrder));
+    if (!sessionsInitialized) return;
+    const active = sessions.filter((session) => !session.closed);
+    const currentIds = new Set(active.map((session) => session.id));
+    const retained = sessionOrder.filter((id) => currentIds.has(id));
+    const added = active.filter((session) => !retained.includes(session.id))
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+      .map((session) => session.id);
+    const nextOrder = retained.concat(added);
+    if (nextOrder.length !== sessionOrder.length || nextOrder.some((id, index) => sessionOrder[index] !== id)) {
+      setSessionOrder(nextOrder);
+      localStorage.setItem(sessionOrderStorageKey, JSON.stringify(nextOrder));
     }
+  }, [sessions, sessionsInitialized, sessionOrder]);
 
-    const nextReviewedIds = reviewedTaskIds.filter((id) => currentIds.has(id));
-    if (nextReviewedIds.length !== reviewedTaskIds.length) {
-      setReviewedTaskIds(nextReviewedIds);
-      localStorage.setItem(reviewedTaskStorageKey, JSON.stringify(nextReviewedIds));
-    }
-
-    const nextOperationalLogVisibility = Object.fromEntries(Object.entries(operationalLogVisibility).filter(([id]) => currentIds.has(id)));
-    if (Object.keys(nextOperationalLogVisibility).length !== Object.keys(operationalLogVisibility).length) {
-      setOperationalLogVisibility(nextOperationalLogVisibility);
-      localStorage.setItem(operationalLogVisibilityStorageKey, JSON.stringify(nextOperationalLogVisibility));
-    }
-  }, [tasks, tasksInitialized, taskOrder, reviewedTaskIds, operationalLogVisibility]);
-
-  useEffect(() => {
-    for (const task of tasks) {
-      if (autoFollowByTask[task.id] === false) continue;
-      const output = terminalOutputRefs.current[task.id];
-      if (output) output.scrollTop = output.scrollHeight;
-    }
-  }, [tasks, autoFollowByTask, operationalLogVisibility]);
-
-  const sortedTasks = useMemo(() => {
-    const orderIndex = new Map(taskOrder.map((id, index) => [id, index] as const));
-    return [...tasks].sort((a, b) => {
-      const aIndex = orderIndex.get(a.id);
-      const bIndex = orderIndex.get(b.id);
-      if (aIndex !== undefined && bIndex !== undefined) return aIndex - bIndex;
-      if (aIndex !== undefined) return -1;
-      if (bIndex !== undefined) return 1;
-      return new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime();
+  const sortedActiveSessions = useMemo(() => {
+    const active = sessions.filter((session) => !session.closed);
+    const position = new Map(sessionOrder.map((id, index) => [id, index] as const));
+    return active.sort((left, right) => {
+      const leftIndex = position.get(left.id);
+      const rightIndex = position.get(right.id);
+      if (leftIndex !== undefined && rightIndex !== undefined) return leftIndex - rightIndex;
+      if (leftIndex !== undefined) return -1;
+      if (rightIndex !== undefined) return 1;
+      return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
     });
-  }, [tasks, taskOrder]);
-  const activeCount = tasks.filter((task) => task.status === "running" || task.status === "stopping").length;
-  const selectedTask = tasks.find((task) => task.id === selectedTaskId) || null;
-  const usageTotals = tasks.reduce((total, task) => ({
-    inputTokens: total.inputTokens + (task.usage?.inputTokens || 0),
-    cachedInputTokens: total.cachedInputTokens + (task.usage?.cachedInputTokens || 0),
-    outputTokens: total.outputTokens + (task.usage?.outputTokens || 0),
-    totalTokens: total.totalTokens + (task.usage?.totalTokens || 0),
-    turns: total.turns + (task.usage?.turns || 0),
-  }), { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, totalTokens: 0, turns: 0 });
-  const filteredTasks = sortedTasks.filter((task) => {
-    const query = search.trim().toLowerCase();
-    const matchesSearch = !query || [task.title, task.prompt, task.cwd].some((value) => value.toLowerCase().includes(query));
-    return matchesSearch;
-  });
-  const visibleTasks = filteredTasks.filter((task) => !task.closed);
+  }, [sessions, sessionOrder]);
 
-  const rateWindows = rateLimits
-    ? [rateLimits.primary, rateLimits.secondary]
-        .filter((window): window is NonNullable<typeof window> => Boolean(window))
-        .sort((left, right) => (left.windowDurationMins ?? Number.MAX_SAFE_INTEGER) - (right.windowDurationMins ?? Number.MAX_SAFE_INTEGER))
-    : [];
+  const query = search.trim().toLowerCase();
+  const filteredActiveSessions = sortedActiveSessions.filter((session) =>
+    !query || [session.title, session.cwd, cliName(session.cli)].some((value) => value.toLowerCase().includes(query))
+  );
+  const historySessions = useMemo(() => sessions
+    .filter((session) => session.closed)
+    .filter((session) => !query || [session.title, session.cwd, cliName(session.cli)].some((value) => value.toLowerCase().includes(query)))
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()), [sessions, query]);
+  const rateWindows = useMemo(() => rateLimits
+    ? [rateLimits.primary, rateLimits.secondary].filter((item): item is RateWindow => Boolean(item))
+      .sort((left, right) => (left.windowDurationMins ?? Number.MAX_SAFE_INTEGER) - (right.windowDurationMins ?? Number.MAX_SAFE_INTEGER))
+    : [], [rateLimits]);
 
-  function notify(message: string, error = false) {
-    setToast({ message, error });
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 3200);
-  }
-
-  function rememberProject(nextPath: string) {
-    const next = [{ path: nextPath, name: getFolderName(nextPath) }, ...projects.filter((project) => project.path.toLowerCase() !== nextPath.toLowerCase())].slice(0, 7);
-    setProjects(next);
-    localStorage.setItem(projectStorageKey, JSON.stringify(next));
-  }
-
-  function saveTaskOrder(nextOrder: string[]) {
-    setTaskOrder(nextOrder);
-    localStorage.setItem(taskOrderStorageKey, JSON.stringify(nextOrder));
-  }
-
-  function toggleOperationalLogs(taskId: string, currentVisibility: boolean) {
-    const next = { ...operationalLogVisibility, [taskId]: !currentVisibility };
-    setOperationalLogVisibility(next);
-    localStorage.setItem(operationalLogVisibilityStorageKey, JSON.stringify(next));
-  }
-
-  function clearTaskDrag() {
-    stopTaskAutoScroll();
-    draggedTaskId.current = null;
-    setDraggingTaskId(null);
-    setDropTargetTaskId(null);
-  }
-
-  function stopTaskAutoScroll() {
-    dragAutoScrollState.current = null;
-    if (dragAutoScrollFrame.current !== null) {
-      cancelAnimationFrame(dragAutoScrollFrame.current);
-      dragAutoScrollFrame.current = null;
-    }
-  }
-
-  function findTaskScrollContainer(start: HTMLElement): HTMLElement | Window {
-    let element = start.parentElement;
-    while (element && element !== document.body && element !== document.documentElement) {
-      const overflowY = getComputedStyle(element).overflowY;
-      if ((overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") && element.scrollHeight > element.clientHeight + 1) return element;
-      element = element.parentElement;
-    }
-    return window;
-  }
-
-  function runTaskAutoScrollFrame() {
-    const state = dragAutoScrollState.current;
-    if (!state) {
-      dragAutoScrollFrame.current = null;
-      return;
-    }
-
-    const position = state.container === window ? window.scrollY : state.container.scrollTop;
-    const maxPosition = state.container === window
-      ? Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
-      : Math.max(0, state.container.scrollHeight - state.container.clientHeight);
-    if ((state.direction < 0 && position <= 0) || (state.direction > 0 && position >= maxPosition)) {
-      stopTaskAutoScroll();
-      return;
-    }
-
-    if (state.container === window) window.scrollBy(0, state.direction * state.speed);
-    else state.container.scrollTop += state.direction * state.speed;
-    dragAutoScrollFrame.current = requestAnimationFrame(() => runTaskAutoScrollFrame());
-  }
-
-  function updateTaskAutoScroll(event: ReactDragEvent<HTMLDivElement>) {
-    const container = findTaskScrollContainer(event.currentTarget);
-    const bounds = container === window ? { top: 0, bottom: window.innerHeight } : container.getBoundingClientRect();
-    const edgeSize = Math.min(84, Math.max(42, (bounds.bottom - bounds.top) * 0.14));
-    let direction: -1 | 1 | 0 = 0;
-    let proximity = 0;
-    if (event.clientY < bounds.top + edgeSize) {
-      direction = -1;
-      proximity = (bounds.top + edgeSize - event.clientY) / edgeSize;
-    } else if (event.clientY > bounds.bottom - edgeSize) {
-      direction = 1;
-      proximity = (event.clientY - (bounds.bottom - edgeSize)) / edgeSize;
-    }
-
-    if (!direction) {
-      stopTaskAutoScroll();
-      return;
-    }
-
-    const position = container === window ? window.scrollY : container.scrollTop;
-    const maxPosition = container === window
-      ? Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
-      : Math.max(0, container.scrollHeight - container.clientHeight);
-    if ((direction < 0 && position <= 0) || (direction > 0 && position >= maxPosition)) {
-      stopTaskAutoScroll();
-      return;
-    }
-
-    dragAutoScrollState.current = { container, direction, speed: Math.max(3, Math.ceil(Math.min(1, proximity) * 18)) };
-    if (dragAutoScrollFrame.current === null) dragAutoScrollFrame.current = requestAnimationFrame(() => runTaskAutoScrollFrame());
-  }
-
-  function startTaskDrag(taskId: string, event: ReactDragEvent<HTMLDivElement>) {
-    stopTaskAutoScroll();
-    draggedTaskId.current = taskId;
-    setDraggingTaskId(taskId);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", taskId);
-  }
-
-  function handleTaskDrop(taskId: string, event: ReactDragEvent<HTMLDivElement>) {
-    event.preventDefault();
-    const sourceId = draggedTaskId.current || event.dataTransfer.getData("text/plain");
-    if (!sourceId || sourceId === taskId) {
-      clearTaskDrag();
-      return;
-    }
-
-    const nextOrder = sortedTasks.map((task) => task.id);
-    const sourceIndex = nextOrder.indexOf(sourceId);
-    const targetIndex = nextOrder.indexOf(taskId);
-    if (sourceIndex < 0 || targetIndex < 0) {
-      clearTaskDrag();
-      return;
-    }
-
-    const [movingId] = nextOrder.splice(sourceIndex, 1);
-    const bounds = event.currentTarget.getBoundingClientRect();
-    let insertionIndex = targetIndex + (event.clientY >= bounds.top + bounds.height / 2 ? 1 : 0);
-    if (sourceIndex < insertionIndex) insertionIndex -= 1;
-    nextOrder.splice(insertionIndex, 0, movingId);
-    saveTaskOrder(nextOrder);
-    clearTaskDrag();
+  function openComposer(path?: string) {
+    setFolderPath(path || folderPath || defaultDirectory || recentFolders[0]?.path || "");
+    setSelectedCli((localStorage.getItem(lastCliStorageKey) === "claude" ? "claude" : selectedCli));
+    setComposerOpen(true);
   }
 
   async function chooseFolder() {
-    try {
-      const selected = await window.codexDesk.chooseFolder();
-      if (selected) setFolderPath(selected);
-    } catch (error) {
-      notify(error instanceof Error ? error.message : "フォルダーを選択できませんでした", true);
-    }
-  }
-
-  async function submitTask(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!folderPath.trim() || !prompt.trim()) {
-      notify("作業フォルダーと依頼文を入力してください", true);
+    const api = bridge();
+    if (typeof api.chooseFolder !== "function") {
+      notify("フォルダー選択APIがありません。CimLineを完全終了して再起動してください。", true);
       return;
     }
-    setLoading(true);
     try {
-      const task = await window.codexDesk.createTask({ cwd: folderPath.trim(), prompt: prompt.trim(), worktree: useWorktree });
-      setTasks((current) => [task, ...current.filter((existing) => existing.id !== task.id)]);
-      saveTaskOrder([task.id, ...sortedTasks.map((existing) => existing.id).filter((id) => id !== task.id)]);
-      setSelectedTaskId(task.id);
-      rememberProject(folderPath.trim());
-      setPrompt("");
+      const selected = await api.chooseFolder();
+      if (selected) setFolderPath(selected);
+    } catch (error) {
+      notify("フォルダーを選択できません: " + errorText(error), true);
+    }
+  }
+
+  function rememberFolder(path: string) {
+    const next = [{ path, name: folderName(path) }, ...recentFolders.filter((folder) => folder.path.toLowerCase() !== path.toLowerCase())].slice(0, 8);
+    setRecentFolders(next);
+    localStorage.setItem(recentFolderStorageKey, JSON.stringify(next));
+  }
+
+  async function createSession(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const cwd = folderPath.trim();
+    if (!cwd) {
+      notify("作業フォルダーを指定してください。", true);
+      return;
+    }
+    const api = bridge();
+    if (typeof api.createSession !== "function") {
+      notify("ターミナル作成APIがありません。CimLineを完全終了して再起動してください。", true);
+      return;
+    }
+    setCreatingSession(true);
+    try {
+      const session = normalizeSessions([await api.createSession({ cwd, cli: selectedCli })])[0];
+      if (!session) throw new Error("ターミナル情報を読み取れませんでした。");
+      setSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
+      setSessionOrder((current) => [session.id, ...current.filter((id) => id !== session.id)]);
+      focusSession(session.id);
       setComposerOpen(false);
-      notify("Codex CLI を起動しました");
+      rememberFolder(cwd);
+      localStorage.setItem(lastCliStorageKey, selectedCli);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "依頼を開始できませんでした", true);
+      notify(cliName(selectedCli) + "を起動できません: " + errorText(error), true);
     } finally {
-      setLoading(false);
+      setCreatingSession(false);
     }
   }
 
-  async function stopTask(id: string) {
+  const closeSession = useCallback(async (sessionId: string) => {
+    const api = bridge();
+    if (typeof api.closeSession !== "function") {
+      notify("ターミナルを閉じるAPIがありません。CimLineを完全終了して再起動してください。", true);
+      return;
+    }
     try {
-      const updated = await window.codexDesk.stopTask(id);
-      setTasks((current) => current.map((task) => task.id === updated.id ? updated : task));
-      notify("停止をリクエストしました");
+      await api.closeSession(sessionId);
+      setSessions((current) => current.map((session) => session.id === sessionId
+        ? { ...session, closed: true, status: "exited", statusAt: new Date().toISOString(), unreviewed: false }
+        : session));
+      if (focusedSessionIdRef.current === sessionId) {
+        focusedSessionIdRef.current = null;
+        setFocusedSessionId(null);
+        const focusedApi = bridge();
+        if (typeof focusedApi.setFocusedSession === "function") void focusedApi.setFocusedSession(null).catch(() => {});
+      }
     } catch (error) {
-      notify(error instanceof Error ? error.message : "停止できませんでした", true);
+      notify("ターミナルを閉じられません: " + errorText(error), true);
     }
-  }
+  }, [notify]);
 
-  async function closeTask(id: string) {
+  async function reopenSession(sessionId: string) {
+    const api = bridge();
+    if (typeof api.reopenSession !== "function") {
+      notify("ターミナル再開APIがありません。CimLineを完全終了して再起動してください。", true);
+      return;
+    }
+    setWorkingSessionId(sessionId);
     try {
-      const updated = await window.codexDesk.closeTask(id);
-      setTasks((current) => current.map((task) => task.id === updated.id ? updated : task));
-      notify("ターミナルを閉じました");
+      const session = normalizeSessions([await api.reopenSession(sessionId)])[0];
+      if (!session) throw new Error("ターミナル情報を読み取れませんでした。");
+      setSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
+      setSessionOrder((current) => [session.id, ...current.filter((id) => id !== session.id)]);
+      focusSession(session.id);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "ターミナルを閉じられませんでした", true);
+      notify("ターミナルを再開できません: " + errorText(error), true);
+    } finally {
+      setWorkingSessionId(null);
     }
   }
 
-  async function reopenTask(id: string) {
+  async function deleteSession(sessionId: string) {
+    const session = sessions.find((item) => item.id === sessionId);
+    if (!session) return;
+    if (!window.confirm("履歴から「" + session.title + "」を削除しますか？")) return;
+    const api = bridge();
+    if (typeof api.deleteSession !== "function") {
+      notify("履歴削除APIがありません。CimLineを完全終了して再起動してください。", true);
+      return;
+    }
     try {
-      const updated = await window.codexDesk.reopenTask(id);
-      setTasks((current) => current.map((task) => task.id === updated.id ? updated : task));
-      notify("ターミナルを再表示しました");
+      await api.deleteSession(sessionId);
+      setSessions((current) => current.filter((item) => item.id !== sessionId));
+      setSessionOrder((current) => current.filter((id) => id !== sessionId));
     } catch (error) {
-      notify(error instanceof Error ? error.message : "ターミナルを再表示できませんでした", true);
+      notify("履歴を削除できません: " + errorText(error), true);
     }
   }
 
-  async function continueTask(event: FormEvent<HTMLFormElement>) {
+  const onDragStart = useCallback((sessionId: string, event: DragEvent<HTMLElement>) => {
+    setDraggingSessionId(sessionId);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", sessionId);
+  }, []);
+
+  const onDragOver = useCallback((sessionId: string, event: DragEvent<HTMLElement>) => {
     event.preventDefault();
-    if (!selectedTask || !followup.trim()) return;
-    setLoading(true);
-    try {
-      const updated = await window.codexDesk.continueTask(selectedTask.id, followup.trim());
-      setTasks((current) => current.map((task) => task.id === updated.id ? updated : task));
-      setFollowup("");
-      notify("同じ会話で依頼を続けました");
-    } catch (error) {
-      notify(error instanceof Error ? error.message : "会話を続けられませんでした", true);
-    } finally {
-      setLoading(false);
-    }
-  }
+    setDropTargetSessionId(sessionId);
+    if (event.clientY < 82) window.scrollBy({ top: -14, behavior: "auto" });
+    else if (event.clientY > window.innerHeight - 82) window.scrollBy({ top: 14, behavior: "auto" });
+  }, []);
 
-  async function continueTerminalTask(taskId: string, event: FormEvent<HTMLFormElement>) {
+  const onDrop = useCallback((sessionId: string, event: DragEvent<HTMLElement>) => {
     event.preventDefault();
-    const task = tasks.find((candidate) => candidate.id === taskId);
-    const draft = (taskDrafts[taskId] || "").trim();
-    if (!task || !draft || !task.threadId || ["running", "stopping"].includes(task.status) || continuingTaskIds.includes(taskId)) return;
-
-    setContinuingTaskIds((current) => current.includes(taskId) ? current : [...current, taskId]);
-    try {
-      const updated = await window.codexDesk.continueTask(taskId, draft);
-      setTasks((current) => current.map((candidate) => candidate.id === updated.id ? updated : candidate));
-      setTaskDrafts((current) => ({ ...current, [taskId]: "" }));
-      notify("同じ会話で依頼を続けました");
-    } catch (error) {
-      notify(error instanceof Error ? error.message : "会話を続けられませんでした", true);
-    } finally {
-      setContinuingTaskIds((current) => current.filter((id) => id !== taskId));
+    const sourceId = draggingSessionId || event.dataTransfer.getData("text/plain");
+    if (!sourceId || sourceId === sessionId) {
+      setDraggingSessionId(null);
+      setDropTargetSessionId(null);
+      return;
     }
-  }
-
-  async function openUsage() {
-    setUsageOpen(true);
-    if (rateLimitsRequest.current) return;
-    rateLimitsRequest.current = true;
-    setRateLimitsLoading(true);
-    setRateLimitsError(false);
-    try {
-      setRateLimits(await window.codexDesk.getRateLimits());
-    } catch {
-      setRateLimitsError(true);
-    } finally {
-      setRateLimitsLoading(false);
-      rateLimitsRequest.current = false;
-    }
-  }
+    const next = sortedActiveSessions.map((session) => session.id);
+    const sourceIndex = next.indexOf(sourceId);
+    const targetIndex = next.indexOf(sessionId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, sourceId);
+    setSessionOrder(next);
+    localStorage.setItem(sessionOrderStorageKey, JSON.stringify(next));
+    setDraggingSessionId(null);
+    setDropTargetSessionId(null);
+  }, [draggingSessionId, sortedActiveSessions]);
 
   async function openSkills() {
     setSkillsOpen(true);
     setSkillsLoading(true);
-    setSkillsError(null);
-    setSkills([]);
-    setSkillWarnings([]);
-    const seenPaths = new Set<string>();
-    const projectPaths = [...tasks.map((task) => task.cwd), ...projects.map((project) => project.path), folderPath]
-      .map((path) => path.trim())
-      .filter((path) => {
-        if (!path) return false;
-        const key = path.toLowerCase();
-        if (seenPaths.has(key)) return false;
-        seenPaths.add(key);
-        return true;
-      });
-
+    setSkillsError("");
     try {
-      const result = await window.codexDesk.getSkills(projectPaths);
-      setSkills(result.skills);
-      setSkillWarnings(result.warnings);
+      const api = bridge();
+      if (typeof api.getSkills !== "function") throw new Error("スキル取得APIがありません。CimLineを完全終了して再起動してください。");
+      const paths = Array.from(new Set(sessions.map((session) => session.cwd).concat(recentFolders.map((folder) => folder.path)))).slice(0, 24);
+      const result = await api.getSkills(paths);
+      setSkills(result.skills || []);
+      setSkillWarnings(result.warnings || []);
     } catch (error) {
-      setSkillsError(error instanceof Error ? error.message : "スキル一覧を取得できませんでした。");
+      setSkillsError(errorText(error));
     } finally {
       setSkillsLoading(false);
     }
   }
 
-  async function deleteTask(id: string) {
-    try {
-      await window.codexDesk.deleteTask(id);
-      setTasks((current) => current.filter((task) => task.id !== id));
-      saveTaskOrder(taskOrder.filter((taskId) => taskId !== id));
-      const nextReviewedIds = reviewedTaskIds.filter((taskId) => taskId !== id);
-      setReviewedTaskIds(nextReviewedIds);
-      localStorage.setItem(reviewedTaskStorageKey, JSON.stringify(nextReviewedIds));
-      const nextOperationalLogVisibility = { ...operationalLogVisibility };
-      delete nextOperationalLogVisibility[id];
-      setOperationalLogVisibility(nextOperationalLogVisibility);
-      localStorage.setItem(operationalLogVisibilityStorageKey, JSON.stringify(nextOperationalLogVisibility));
-      setTaskDrafts((current) => {
-        const next = { ...current };
-        delete next[id];
-        return next;
-      });
-      setAutoFollowByTask((current) => {
-        const next = { ...current };
-        delete next[id];
-        return next;
-      });
-      delete terminalOutputRefs.current[id];
-      delete terminalScrollMetrics.current[id];
-      if (selectedTaskId === id) {
-        setSelectedTaskId(null);
-        setDetailsOpen(false);
-      }
-      notify("履歴から削除しました");
-    } catch (error) {
-      notify(error instanceof Error ? error.message : "履歴を削除できませんでした", true);
-    }
+  function showUsage() {
+    setUsageOpen(true);
+    void refreshUsage();
   }
 
-  async function copyFolder() {
-    try {
-      await navigator.clipboard.writeText(folderPath);
-      notify("パスをコピーしました");
-    } catch {
-      notify("パスをコピーできませんでした", true);
-    }
-  }
-
-  function openDetails(task: RunTask) {
-    const nextReviewedIds = [...reviewedTaskIds.filter((id) => id !== task.id), task.id];
-    setReviewedTaskIds(nextReviewedIds);
-    localStorage.setItem(reviewedTaskStorageKey, JSON.stringify(nextReviewedIds));
-    setSelectedTaskId(task.id);
-    setDetailsOpen(true);
-  }
+  const skillGroups: Array<{ scope: Skill["scope"] | "codex-home"; label: string }> = [
+    { scope: "user", label: "ユーザー" },
+    { scope: "project", label: "プロジェクト" },
+    { scope: "system", label: "システム" },
+    { scope: "plugin", label: "プラグイン" },
+  ];
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span>
-          <span className="brand-copy"><strong>CimLine</strong><small>CLI MANAGER</small></span>
-        </div>
-
-        <Button variant="outline" className="sidebar-new" onClick={() => setComposerOpen(true)}>
-          <Plus size={16} className="plus-icon" /><span>新しい依頼</span><kbd>CTRL ↵</kbd>
-        </Button>
-
-        <button className="sidebar-nav-item active" type="button" onClick={() => document.getElementById("overview")?.scrollIntoView({ behavior: "smooth" })}>
-          <LayoutDashboard size={15} /><span>ターミナル</span>{activeCount > 0 && <span className="nav-count">{activeCount}</span>}
-        </button>
-        <button className="sidebar-nav-item" type="button" onClick={openUsage}>
-          <Activity size={15} /><span>使用量</span>{usageTotals.totalTokens > 0 && <span className="nav-count">{numberLabel(usageTotals.totalTokens)}</span>}
-        </button>
-        <button className="sidebar-nav-item" type="button" title="スキル一覧" aria-label="スキル一覧を開く" onClick={openSkills}>
-          <Sparkles size={15} /><span>スキル</span>
-        </button>
-
-        <div className="recent-heading"><span className="sidebar-group-label">最近のフォルダー</span><span className="recent-dot" /></div>
-        <div className="recent-projects">
-          {projects.length === 0 ? <p className="recent-empty">依頼を実行すると<br />ここに表示されます</p> : projects.map((project) => (
-            <button key={project.path} className={`recent-project ${folderPath === project.path ? "selected" : ""}`} type="button" title={project.path} onClick={() => setFolderPath(project.path)}>
-              <Folder size={14} /><span>{project.name}</span>
-            </button>
-          ))}
-        </div>
-
-        <div className="history-heading"><span className="sidebar-group-label">依頼履歴</span><span className="recent-dot" /></div>
-        <div className="sidebar-history-list" aria-label="依頼履歴">
-          {sortedTasks.length === 0 ? <p className="recent-empty">依頼はまだありません</p> : sortedTasks.map((task) => (
-            <div className={`sidebar-history-row${task.closed ? " is-closed" : ""}`} key={task.id}>
-              <button className="sidebar-history-item" type="button" title={`${task.title} · ${task.cwd}`} onClick={() => task.closed ? reopenTask(task.id) : openDetails(task)}>
-                <strong>{task.title}</strong>
-                <span><span>{getFolderName(task.cwd)}</span><i>·</i><small className={`sidebar-history-status state-${task.status}`}>{statusText[task.status]}{task.closed ? " · 非表示" : ""}</small></span>
-              </button>
-              {task.closed && <Button variant="ghost" size="icon-sm" className="sidebar-history-reopen" type="button" title="ターミナルを再表示" aria-label={`${task.title}を再表示`} onClick={() => reopenTask(task.id)}><Eye size={13} /></Button>}
+        <div className="brand-lockup"><div className="brand-mark"><span /></div><div><strong>CimLine</strong><small>CLI WORKSPACE</small></div></div>
+        <button className="sidebar-new" type="button" onClick={() => openComposer()}><Plus size={17} /><span>新しいターミナル</span><kbd>Ctrl N</kbd></button>
+        <nav className="sidebar-nav" aria-label="メインメニュー">
+          <button className="sidebar-nav-item is-active" type="button"><TerminalIcon size={16} /><span>ターミナル</span><span className="nav-count">{sessions.filter((session) => !session.closed).length}</span></button>
+          <button className="sidebar-nav-item" type="button" onClick={() => void openSkills()}><Sparkles size={15} /><span>スキル一覧</span></button>
+          <button className="sidebar-nav-item" type="button" onClick={showUsage}><Activity size={15} /><span>使用量</span></button>
+        </nav>
+        <Separator className="sidebar-separator" />
+        <div className="sidebar-scroll">
+          <section className="sidebar-section">
+            <div className="sidebar-section-heading"><span>最近使ったフォルダー</span><span>{recentFolders.length}</span></div>
+            <div className="recent-folder-list">
+              {recentFolders.length ? recentFolders.map((folder) => (
+                <button type="button" className="recent-folder" key={folder.path} title={folder.path} onClick={() => openComposer(folder.path)}>
+                  <Folder size={14} /><span>{folder.name}</span>
+                </button>
+              )) : <div className="sidebar-empty">選んだフォルダーがここに並びます。</div>}
             </div>
-          ))}
+          </section>
+          <section className="sidebar-section history-section">
+            <div className="sidebar-section-heading"><span>履歴</span><span>{historySessions.length}</span></div>
+            <div className="history-list">
+              {historySessions.length ? historySessions.map((session) => (
+                <article className={"history-row" + (session.unreviewed && (session.status === "completed" || session.status === "approval") ? ` is-unreviewed is-unreviewed-${session.status}` : "")} key={session.id}>
+                  <button type="button" className="history-open" onClick={() => void reopenSession(session.id)} disabled={workingSessionId === session.id} title={session.cwd}>
+                    <span className={"history-cli-dot is-" + session.cli} />
+                    <span className="history-copy">
+                      <strong>{session.title || folderName(session.cwd)}</strong>
+                      <small>{cliName(session.cli)} · {session.cwd}</small>
+                      <span className={"history-status is-" + session.status} title={sessionStatusLabel(session.status) + (statusAgeLabel(session.statusAt, statusClock) ? " " + statusAgeLabel(session.statusAt, statusClock) : "")}>
+                        {sessionStatusLabel(session.status)}{statusAgeLabel(session.statusAt, statusClock) && <span className="history-status-age">{statusAgeLabel(session.statusAt, statusClock)}</span>}
+                      </span>
+                    </span>
+                    {workingSessionId === session.id ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}
+                  </button>
+                  <button type="button" className="history-delete" aria-label={session.title + " の履歴を削除"} title="履歴を削除" onClick={() => void deleteSession(session.id)}><Trash2 size={13} /></button>
+                </article>
+              )) : <div className="sidebar-empty">{sessionsInitialized ? "閉じたターミナルはありません。" : "履歴を読み込んでいます…"}</div>}
+            </div>
+          </section>
         </div>
-
         <div className="sidebar-bottom">
-          <div className="cli-state"><span className={`status-dot ${cliAvailable === false ? "offline" : "online"}`} /><span>{cliAvailable === null ? "CLIを確認中" : cliAvailable ? "Codex CLI 利用可能" : "Codex CLI が未検出"}</span></div>
-          <p>履歴はアプリ終了後も保存されます</p>
+          <div className="cli-state"><span className="connection-dot" /><span>ローカル接続</span></div>
+          <p>{cliAvailable.codex ? "Codex" : "Codex 未検出"}<span> · </span>{cliAvailable.claude ? "Claude" : "Claude 未検出"}</p>
         </div>
       </aside>
 
       <div className="main-column">
         <header className="topbar">
+          <div className="topbar-left">
+            <label className="search-box"><Search size={14} /><input ref={searchRef} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="ターミナルを検索" aria-label="ターミナルを検索" /><kbd>/</kbd></label>
+          </div>
           <div className="topbar-right">
-            <label className="search-box"><Search size={14} /><input ref={searchRef} aria-label="依頼を検索" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="依頼を検索" /><kbd>/</kbd></label>
-            <Badge variant="outline" className="connection-badge"><span className={`status-dot ${cliAvailable === false ? "offline" : "online"}`} />{cliAvailable ? "ローカル接続" : cliAvailable === false ? "CLI未検出" : "接続中"}</Badge>
+            <span className="connection-badge"><span className="connection-dot" />ローカル接続</span>
+            <button className="topbar-new" type="button" onClick={() => openComposer()}><Plus size={15} />新規</button>
           </div>
         </header>
-
-        <main className="page-content terminal-only-content" id="overview">
-          <section className="runs-section">
+        {bridgeError && <div className="bridge-error"><AlertCircle size={15} /><span>{bridgeError}</span></div>}
+        <main className="workspace">
+          {filteredActiveSessions.length ? (
             <div className="terminal-grid">
-                {visibleTasks.length > 0 ? visibleTasks.map((task) => {
-                  const showOperationalLogs = operationalLogVisibility[task.id] ?? true;
-                  const recentLogs = task.logs.filter((log) => showOperationalLogs || (log.kind !== "system" && log.kind !== "command")).slice(-8);
-                  const unreviewed = task.status === "completed" && !reviewedTaskIds.includes(task.id);
-                  return <Card
-                    className={`terminal-pane${task.status === "running" ? " terminal-pane-running" : ""}${unreviewed ? " terminal-pane-unreviewed" : ""}${draggingTaskId === task.id ? " terminal-pane-dragging" : ""}${dropTargetTaskId === task.id ? " terminal-pane-drop-target" : ""}`}
-                    key={task.id}
-                    onDragOver={(event) => {
-                      if (!draggedTaskId.current) return;
-                      event.preventDefault();
-                      event.dataTransfer.dropEffect = "move";
-                      updateTaskAutoScroll(event);
-                      if (draggedTaskId.current === task.id) return;
-                      setDropTargetTaskId(task.id);
-                    }}
-                    onDragLeave={(event) => {
-                      const nextTarget = event.relatedTarget;
-                      if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
-                      setDropTargetTaskId((current) => current === task.id ? null : current);
-                    }}
-                    onDrop={(event) => handleTaskDrop(task.id, event)}
-                  >
-                    <div
-                      className="terminal-titlebar terminal-titlebar-draggable"
-                      draggable
-                      onDragStart={(event) => {
-                        if (event.target instanceof HTMLElement && event.target.closest(".terminal-close")) {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          return;
-                        }
-                        startTaskDrag(task.id, event);
-                      }}
-                      onDragEnd={clearTaskDrag}
-                    >
-                      <div className="terminal-lights"><i /><i /><i /></div>
-                      <div className="terminal-context terminal-context-task">
-                        <Terminal size={15} />
-                        <div className="terminal-context-copy">
-                          <strong className="terminal-context-title" title={task.title}>{task.title}</strong>
-                          <div className="terminal-context-location">
-                            <span className="terminal-context-path" title={task.cwd}>{task.cwd}</span>
-                            <small className="terminal-context-mode">{task.worktree ? "worktree" : "workspace"}</small>
-                          </div>
-                        </div>
-                      </div>
-                      {statusBadge(task)}
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="terminal-close"
-                        type="button"
-                        draggable={false}
-                        title="ターミナルを閉じる"
-                        aria-label="ターミナルを閉じる"
-                        onDragStart={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={() => closeTask(task.id)}
-                      ><X size={13} /></Button>
-                    </div>
-                    <div className="terminal-screen">
-                      <div className="terminal-initial-prompt"><span>codex@{getFolderName(task.cwd)}</span><b>$</b>{shortText(task.prompt, 150)}</div>
-                      <div
-                        className="terminal-output"
-                        ref={(element) => { terminalOutputRefs.current[task.id] = element; }}
-                        onScroll={(event) => {
-                          const element = event.currentTarget;
-                          const previous = terminalScrollMetrics.current[task.id];
-                          const manuallyScrolledUp = previous
-                            && previous.scrollHeight === element.scrollHeight
-                            && previous.clientHeight === element.clientHeight
-                            && element.scrollTop < previous.scrollTop - 2;
-                          terminalScrollMetrics.current[task.id] = {
-                            scrollTop: element.scrollTop,
-                            scrollHeight: element.scrollHeight,
-                            clientHeight: element.clientHeight,
-                          };
-                          if (manuallyScrolledUp) {
-                            setAutoFollowByTask((current) => current[task.id] === false ? current : { ...current, [task.id]: false });
-                          }
-                        }}
-                      >
-                        {recentLogs.length ? recentLogs.map((log) => log.kind === "system" || log.kind === "command" ? (
-                          <details key={log.id} className={`terminal-line terminal-line-${log.kind} terminal-line-collapsible`}>
-                            <summary className="terminal-line-summary">
-                              <span className="terminal-line-kind">{terminalPrefix(log.kind)}</span>
-                              <p title={log.text}>{shortText(log.text, 180)}</p>
-                            </summary>
-                            <pre className="terminal-line-expanded">{log.text}</pre>
-                          </details>
-                        ) : <div key={log.id} className={`terminal-line terminal-line-${log.kind}${log.kind === "user" || log.kind === "assistant" ? " terminal-line-conversation" : ""}`}><span className={log.kind === "user" || log.kind === "assistant" ? "terminal-line-speaker" : "terminal-line-kind"}>{terminalPrefix(log.kind)}</span><p>{log.text}</p></div>) : task.logs.length === 0 ? <div className="terminal-line terminal-line-system"><span className="terminal-line-kind">状態</span><p>Codex CLI の応答を待っています…</p></div> : null}
-                        {(task.status === "running" || task.status === "stopping") && <div className="terminal-line terminal-live"><span>·</span><p><i /></p></div>}
-                      </div>
-                    </div>
-                    <form className="terminal-followup-form" onSubmit={(event) => continueTerminalTask(task.id, event)}>
-                      <Textarea
-                        className="terminal-followup-input"
-                        value={taskDrafts[task.id] || ""}
-                        onChange={(event) => setTaskDrafts((current) => ({ ...current, [task.id]: event.target.value }))}
-                        onKeyDown={(event) => {
-                          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-                          if (event.key === "Enter" && event.altKey) {
-                            event.preventDefault();
-                            const textarea = event.currentTarget;
-                            const value = textarea.value;
-                            const cursorStart = textarea.selectionStart;
-                            const cursorEnd = textarea.selectionEnd;
-                            const nextValue = `${value.slice(0, cursorStart)}\n${value.slice(cursorEnd)}`;
-                            if (nextValue.length <= 20000) {
-                              setTaskDrafts((current) => ({ ...current, [task.id]: nextValue }));
-                              requestAnimationFrame(() => {
-                                textarea.focus();
-                                textarea.setSelectionRange(cursorStart + 1, cursorStart + 1);
-                              });
-                            }
-                            return;
-                          }
-                          const canSubmit = !["running", "stopping"].includes(task.status) && !continuingTaskIds.includes(task.id) && Boolean(task.threadId) && Boolean((taskDrafts[task.id] || "").trim());
-                          if (event.key === "Enter" && !event.altKey && !event.shiftKey && !event.ctrlKey && !event.metaKey && canSubmit) {
-                            event.preventDefault();
-                            event.currentTarget.form?.requestSubmit();
-                          }
-                        }}
-                        rows={1}
-                        maxLength={20000}
-                        placeholder="このターミナルの会話に追加で依頼…"
-                        aria-label={`${task.title}への追加依頼`}
-                      />
-                      <div className="terminal-followup-controls">
-                        <span className="terminal-followup-hint">
-                          Enter 送信・Alt+Enter 改行
-                        </span>
-                        <Button
-                          type="submit"
-                          size="sm"
-                          className="terminal-followup-submit"
-                          disabled={continuingTaskIds.includes(task.id) || task.status === "running" || task.status === "stopping" || !task.threadId || !(taskDrafts[task.id] || "").trim()}
-                        >
-                          {continuingTaskIds.includes(task.id) ? "送信中…" : "送信"}<ArrowUpRight size={13} />
-                        </Button>
-                      </div>
-                    </form>
-                    <div className="terminal-footer"><div><span className="terminal-token-count-footer" title="累積トークン使用量"><Activity size={11} />{numberLabel(task.usage?.totalTokens || 0)} tokens</span></div><div className="terminal-actions"><Button variant="ghost" size="sm" className={`terminal-operation-toggle${showOperationalLogs ? "" : " is-hidden"}`} type="button" aria-label={showOperationalLogs ? "操作ログを非表示" : "操作ログを表示"} aria-pressed={showOperationalLogs} title={showOperationalLogs ? "操作ログを非表示" : "操作ログを表示"} onClick={() => toggleOperationalLogs(task.id, showOperationalLogs)}>{showOperationalLogs ? <EyeOff size={12} /> : <Eye size={12} />}<span>操作ログ</span></Button><Button variant="ghost" size="sm" className={`terminal-autofollow-toggle${autoFollowByTask[task.id] === false ? " is-paused" : ""}`} type="button" aria-label={autoFollowByTask[task.id] === false ? "ログの自動追従を再開" : "ログの自動追従を一時停止"} aria-pressed={autoFollowByTask[task.id] !== false} title={autoFollowByTask[task.id] === false ? "自動追従を再開" : "自動追従中"} onClick={() => setAutoFollowByTask((current) => ({ ...current, [task.id]: current[task.id] === false }))}><ArrowDown size={12} /><span>{autoFollowByTask[task.id] === false ? "追従OFF" : "追従ON"}</span></Button><Button variant="ghost" size="sm" onClick={() => openDetails(task)}>詳細</Button>{task.status === "running" || task.status === "stopping" ? <Button variant="outline" size="sm" className="terminal-stop" onClick={() => stopTask(task.id)}><Square size={10} />停止</Button> : null}</div></div>
-                  </Card>;
-                }) : null}
+              {filteredActiveSessions.map((session) => (
+                <TerminalPane
+                  key={session.id}
+                  session={session}
+                  statusLabel={sessionStatusLabel(session.status)}
+                  statusAge={statusAgeLabel(session.statusAt, statusClock)}
+                  focused={focusedSessionId === session.id}
+                  dragging={draggingSessionId === session.id}
+                  dropTarget={dropTargetSessionId === session.id}
+                  onClose={closeSession}
+                  onFocus={focusSession}
+                  onDragStart={onDragStart}
+                  onDragOver={onDragOver}
+                  onDrop={onDrop}
+                  onError={notify}
+                />
+              ))}
             </div>
-          </section>
+          ) : sessionsInitialized ? (
+            <section className="empty-workspace">
+              <div className="empty-terminal-icon"><TerminalIcon size={25} /></div>
+              <h1>{query ? "一致するターミナルがありません" : historySessions.length ? "開いているターミナルはありません" : "ターミナルを作成"}</h1>
+              <p>{query ? "検索語を変えてください。" : "フォルダーとCLIを選ぶと、すぐに対話できるターミナルが開きます。"}</p>
+              {!query && <button type="button" onClick={() => openComposer()}><Plus size={15} />新しいターミナル</button>}
+            </section>
+          ) : (
+            <section className="empty-workspace"><LoaderCircle size={20} className="spin" /><span>ターミナルを読み込んでいます…</span></section>
+          )}
         </main>
       </div>
 
-      <dialog
-        ref={composerDialogRef}
-        className="run-dialog composer-dialog"
-        aria-labelledby="composer-dialog-title"
-        onCancel={(event) => { event.preventDefault(); setComposerOpen(false); }}
-        onClose={() => setComposerOpen(false)}
-        onClick={(event) => { if (event.target === event.currentTarget) setComposerOpen(false); }}
-      >
-        <Card className="dialog-card composer-dialog-card">
-          <CardContent className="dialog-content">
-            <div className="dialog-heading"><div><h2 id="composer-dialog-title">新しい依頼</h2><p>作業フォルダーとCodexへの依頼を入力。</p></div><Button variant="ghost" size="icon-sm" aria-label="閉じる" onClick={() => setComposerOpen(false)}><X size={16} /></Button></div>
-            {cliAvailable === false && <div className="cli-warning">Codex CLI を見つけられません。Node.js と npm のグローバルインストールを確認してください。</div>}
-            <form onSubmit={submitTask}>
-              <label className="field-label" htmlFor="folder-path">作業フォルダー <span>必須</span></label>
-              <div className="folder-field">
-                <FolderOpen size={15} />
-                <Input id="folder-path" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} spellCheck={false} autoComplete="off" placeholder="例: F:\\projects\\my-app" className="folder-input" required />
-                <Button variant="ghost" size="icon-sm" type="button" title="パスをコピー" aria-label="パスをコピー" onClick={copyFolder}><Copy size={14} /></Button>
-                <Button variant="outline" size="sm" type="button" className="browse-button" onClick={chooseFolder}><FolderOpen size={13} />選択</Button>
-              </div>
-              <div className="field-label prompt-label"><label htmlFor="prompt-input">Codexへの依頼</label><span>具体的に書くほど正確です</span></div>
-              <div className="prompt-field">
-                <Textarea
-                  ref={promptRef}
-                  id="prompt-input"
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-                    if (event.key === "Enter" && event.altKey) {
-                      event.preventDefault();
-                      const textarea = event.currentTarget;
-                      const value = textarea.value;
-                      const cursorStart = textarea.selectionStart;
-                      const cursorEnd = textarea.selectionEnd;
-                      const nextValue = `${value.slice(0, cursorStart)}\n${value.slice(cursorEnd)}`;
-                      if (nextValue.length <= 20000) {
-                        setPrompt(nextValue);
-                        requestAnimationFrame(() => {
-                          textarea.focus();
-                          textarea.setSelectionRange(cursorStart + 1, cursorStart + 1);
-                        });
-                      }
-                      return;
-                    }
-                    if (event.key === "Enter" && !event.altKey && !event.shiftKey && !event.ctrlKey && !event.metaKey && !loading) {
-                      event.preventDefault();
-                      event.currentTarget.form?.requestSubmit();
-                    }
-                  }}
-                  rows={5}
-                  maxLength={20000}
-                  placeholder="例: このプロジェクトの構成を確認して、READMEにセットアップ手順を追記してください。変更したファイルと内容を最後にまとめてください。"
-                  required
-                />
-                <div className="run-options"><label><input type="checkbox" checked={useWorktree} onChange={(event) => setUseWorktree(event.target.checked)} /><GitBranch size={12} /><span>Git worktreeで分離</span></label><small>並行実行時に作業フォルダーを分ける</small></div>
-                <div className="prompt-footer"><span><ShieldCheck size={12} /> 現在のCLI設定で実行</span><Button type="submit" disabled={loading || cliAvailable === false} className="submit-button"><span>{loading ? "起動しています…" : "依頼を実行"}</span>{loading ? <LoaderCircle size={14} className="spin" /> : <ArrowUpRight size={15} />}</Button></div>
-              </div>
-            </form>
-          </CardContent>
-        </Card>
-      </dialog>
-
-      <dialog
-        ref={detailsDialogRef}
-        className="run-dialog details-dialog"
-        aria-labelledby="details-dialog-title"
-        onCancel={(event) => { event.preventDefault(); setDetailsOpen(false); }}
-        onClose={() => setDetailsOpen(false)}
-        onClick={(event) => { if (event.target === event.currentTarget) setDetailsOpen(false); }}
-      >
-        {selectedTask && <Card className="dialog-card details-dialog-card"><CardContent className="details-dialog-content">
-          <div className="dialog-heading"><div><div className="section-kicker"><span>SESSION</span> TERMINAL DETAILS</div><h2 id="details-dialog-title">{selectedTask.title}</h2></div><Button variant="ghost" size="icon-sm" aria-label="閉じる" onClick={() => setDetailsOpen(false)}><X size={16} /></Button></div>
-          <div className="detail-meta">{statusBadge(selectedTask)}<span>{timeLabel(selectedTask.startedAt)} · {durationLabel(selectedTask, now)}</span><span className="detail-token-count">{numberLabel(selectedTask.usage?.totalTokens || 0)} tokens</span></div>
-          <div className="detail-path"><Folder size={13} /><span title={selectedTask.cwd}>{selectedTask.cwd}</span></div>
-          <div className="detail-prompt"><span>最初の依頼</span><p>{selectedTask.prompt}</p></div>
-          <div className="activity-title"><span>TERMINAL OUTPUT</span><Separator /><small>{selectedTask.logs.length} LINES</small></div>
-          <div className="activity-list details-log-list">
-            {selectedTask.logs.length ? selectedTask.logs.map((log) => <article className={`activity-item activity-${log.kind}${log.kind === "user" || log.kind === "assistant" ? " activity-conversation" : ""}`} key={log.id}><div className="activity-item-head"><span className="activity-speaker">{terminalPrefix(log.kind)}</span><time>{timeLabel(log.at)}</time></div><p>{log.text}</p></article>) : <div className="activity-waiting"><LoaderCircle size={14} className="spin" />Codex の応答を待っています…</div>}
+      <dialog ref={composerRef} className="app-dialog new-session-dialog" onCancel={(event) => { event.preventDefault(); setComposerOpen(false); }} onClose={() => setComposerOpen(false)} onClick={(event) => { if (event.target === event.currentTarget) setComposerOpen(false); }}>
+        <form className="dialog-card" onSubmit={createSession}>
+          <div className="dialog-heading">
+            <div><div className="dialog-kicker">NEW TERMINAL</div><h2>新しいターミナル</h2><p>フォルダーとCLIを選んで、対話型セッションを開始します。</p></div>
+            <button type="button" className="icon-button" aria-label="閉じる" onClick={() => setComposerOpen(false)}><X size={17} /></button>
           </div>
-          {selectedTask.threadId && <form className="followup-form" onSubmit={continueTask}>
-            <label htmlFor="followup-input">会話を続ける</label>
-            <Textarea ref={followupRef} id="followup-input" rows={2} maxLength={20000} value={followup} onChange={(event) => setFollowup(event.target.value)} placeholder="この会話の続きとして依頼できます…" disabled={selectedTask.status === "running" || selectedTask.status === "stopping"} />
-            <div className="followup-footer"><span>{selectedTask.worktree ? "Git worktree の会話" : "同じCodex会話を続行"}</span><Button size="sm" type="submit" disabled={loading || !followup.trim() || selectedTask.status === "running" || selectedTask.status === "stopping"}>送信 <ArrowUpRight size={13} /></Button></div>
-          </form>}
-          <div className="detail-actions">{selectedTask.status === "running" || selectedTask.status === "stopping" ? <Button variant="outline" size="sm" className="danger-button" onClick={() => stopTask(selectedTask.id)}><Square size={11} />この依頼を停止</Button> : <Button variant="ghost" size="sm" onClick={() => deleteTask(selectedTask.id)}><Trash2 size={12} />履歴から削除</Button>}</div>
-        </CardContent></Card>}
+          {bridgeError && <div className="inline-error"><AlertCircle size={14} />{bridgeError}</div>}
+          <label className="field-label" htmlFor="new-session-folder">作業フォルダー</label>
+          <div className="folder-field">
+            <FolderOpen size={16} />
+            <input id="new-session-folder" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder={defaultDirectory || "フォルダーを選択"} spellCheck={false} required />
+            <button type="button" className="outline-button" onClick={() => void chooseFolder()}>選択</button>
+          </div>
+          <div className="field-label cli-picker-label">CLI</div>
+          <div className="cli-picker">
+            <label className={"cli-choice is-codex" + (selectedCli === "codex" ? " is-selected" : "")}>
+              <input type="radio" name="cli" value="codex" checked={selectedCli === "codex"} onChange={() => setSelectedCli("codex")} />
+              <Code2 size={20} /><span><strong>Codex CLI</strong><small>{cliAvailable.codex ? "利用できます" : "インストールされていない可能性があります"}</small></span>
+              {selectedCli === "codex" && <Check size={17} />}
+            </label>
+            <label className={"cli-choice is-claude" + (selectedCli === "claude" ? " is-selected" : "")}>
+              <input type="radio" name="cli" value="claude" checked={selectedCli === "claude"} onChange={() => setSelectedCli("claude")} />
+              <Sparkles size={20} /><span><strong>Claude Code</strong><small>{cliAvailable.claude ? "利用できます" : "インストールされていない可能性があります"}</small></span>
+              {selectedCli === "claude" && <Check size={17} />}
+            </label>
+          </div>
+          <div className="dialog-footer">
+            <span>{cliAvailable[selectedCli] ? "選択したCLIをシェル内で起動します。" : cliName(selectedCli) + "が見つからない場合は環境変数で実行パスを指定できます。"}</span>
+            <button type="button" className="text-button" onClick={() => setComposerOpen(false)}>キャンセル</button>
+            <button type="submit" className="primary-button" disabled={creatingSession || !folderPath.trim()}>{creatingSession ? <LoaderCircle size={15} className="spin" /> : <Plus size={15} />}{creatingSession ? "起動中…" : "作成"}</button>
+          </div>
+        </form>
       </dialog>
 
-      <dialog
-        ref={skillsDialogRef}
-        className="run-dialog skills-dialog"
-        aria-labelledby="skills-dialog-title"
-        onCancel={(event) => { event.preventDefault(); setSkillsOpen(false); }}
-        onClose={() => setSkillsOpen(false)}
-        onClick={(event) => { if (event.target === event.currentTarget) setSkillsOpen(false); }}
-      >
-        <Card className="dialog-card skills-dialog-card"><CardContent className="skills-dialog-content">
-          <div className="dialog-heading"><div><h2 id="skills-dialog-title">スキル一覧</h2><p>ローカルで見つかったCodexスキルをソース別に一覧表示します。</p></div><Button variant="ghost" size="icon-sm" aria-label="閉じる" onClick={() => setSkillsOpen(false)}><X size={16} /></Button></div>
-          {skillsLoading ? <div className="skills-state"><LoaderCircle size={16} className="spin" />スキルを読み込んでいます…</div> : skillsError ? <div className="skills-state is-error">{skillsError}</div> : <>
-            <div className="skills-source-list">
-              {([
-                { scope: "user", label: "ユーザー" },
-                { scope: "project", label: "プロジェクト" },
-                { scope: "system", label: "システム" },
-                { scope: "plugin", label: "プラグイン" },
-              ] as const).map(({ scope, label }) => {
-                const sourceScopes = scope === "user" ? ["user", "codex-home"] : [scope];
-                const sourceSkills = skills.filter((skill) => sourceScopes.includes(skill.scope));
-                if (!sourceSkills.length) return null;
-                return <section className="skills-source-group" key={scope}>
-                  <div className="skills-source-heading"><h3>{label}</h3><span>{sourceSkills.length}</span></div>
-                  <div className="skills-items">{sourceSkills.map((skill) => <article className="skill-item" key={`${scope}:${skill.projectPath || ""}:${skill.path}:${skill.name}`}>
-                    <div className="skill-item-heading"><h4>{skill.name}</h4><span className={`skill-source-badge is-${skill.scope === "codex-home" ? "user" : skill.scope}`}>{label}</span></div>
-                    <p>{skill.description || "説明はありません。"}</p>
-                    <small className="skill-item-location" title={skill.projectPath || skill.path}>{scope === "project" ? skill.projectPath || skill.path : skill.path}</small>
-                  </article>)}</div>
-                </section>;
-              })}
-              {!skills.length && <div className="skills-state">スキルは見つかりませんでした。</div>}
-            </div>
-            {skillWarnings.length > 0 && <section className="skills-warnings">
-              <h3>確認事項</h3>
-              <ul>{skillWarnings.map((warning, index) => <li key={`${index}:${warning}`}>{warning}</li>)}</ul>
-            </section>}
-          </>}
-        </CardContent></Card>
+      <dialog ref={skillsRef} className="app-dialog skills-dialog" onCancel={(event) => { event.preventDefault(); setSkillsOpen(false); }} onClose={() => setSkillsOpen(false)} onClick={(event) => { if (event.target === event.currentTarget) setSkillsOpen(false); }}>
+        <div className="dialog-card">
+          <div className="dialog-heading"><div><div className="dialog-kicker">LOCAL SKILLS</div><h2>スキル一覧</h2><p>ローカルとプラグインから見つかったCodexスキルです。</p></div><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setSkillsOpen(false)}><X size={17} /></button></div>
+          {skillsLoading ? <div className="dialog-state"><LoaderCircle size={16} className="spin" />スキルを読み込んでいます…</div> : skillsError ? <div className="dialog-state is-error">{skillsError}</div> : (
+            <>
+              <div className="skills-content">
+                {skillGroups.map((group) => {
+                  const items = skills.filter((skill) => group.scope === "user" ? skill.scope === "user" || skill.scope === "codex-home" : skill.scope === group.scope);
+                  if (!items.length) return null;
+                  return <section className="skill-group" key={group.scope}><div className="skill-group-heading"><h3>{group.label}</h3><span>{items.length}</span></div><div className="skill-list">{items.map((skill) => <article className="skill-item" key={skill.path + skill.name}><div><strong>{skill.name}</strong><span className={"skill-scope is-" + skill.scope}>{group.label}</span></div><p>{skill.description || "説明はありません。"}</p><small title={skill.projectPath || skill.path}>{skill.projectPath || skill.path}</small></article>)}</div></section>;
+                })}
+                {skills.length === 0 && <div className="dialog-state">スキルは見つかりませんでした。</div>}
+              </div>
+              {skillWarnings.length > 0 && <section className="skill-warnings"><h3>確認事項</h3><ul>{skillWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></section>}
+            </>
+          )}
+        </div>
       </dialog>
 
-      <dialog
-        ref={usageDialogRef}
-        className="run-dialog usage-dialog"
-        aria-labelledby="usage-dialog-title"
-        onCancel={(event) => { event.preventDefault(); setUsageOpen(false); }}
-        onClose={() => setUsageOpen(false)}
-        onClick={(event) => { if (event.target === event.currentTarget) setUsageOpen(false); }}
-      >
-        <Card className="dialog-card usage-dialog-card"><CardContent className="usage-content">
-          <div className="dialog-heading"><div><h2 id="usage-dialog-title">使用量</h2></div><div className="usage-heading-actions"><Button variant="ghost" size="icon-sm" aria-label="利用枠を更新" title="利用枠を更新" onClick={openUsage} disabled={rateLimitsLoading}><RefreshCw size={15} className={rateLimitsLoading ? "spin" : ""} /></Button><Button variant="ghost" size="icon-sm" aria-label="閉じる" onClick={() => setUsageOpen(false)}><X size={16} /></Button></div></div>
-          <section className="remaining-section">
-            <div className="usage-section-heading"><h3>アカウント利用枠</h3><span>Codexアカウント</span></div>
-            {rateLimitsLoading && !rateLimits ? <div className="usage-empty">利用枠を取得しています…</div> : rateWindows.length ? <div className="rate-window-list">{rateWindows.map((window, index) => {
-              const used = Math.max(0, Math.min(100, window.usedPercent));
-              const resetAt = resetTimeLabel(window.resetsAt);
-              const intensity = used >= 90 ? " is-critical" : used >= 70 ? " is-warning" : "";
-              return <div className={`rate-window${intensity}`} key={`${window.windowDurationMins || "limit"}-${index}`}>
-                <div className="rate-window-heading"><span>{rateWindowLabel(window.windowDurationMins)}</span><strong>{Math.round(used)}% <small>使用済み</small></strong></div>
-                <div className="rate-window-track"><span style={{ width: `${used}%` }} /></div>
-                <small className="rate-window-reset">{resetAt ? `リセット ${resetAt}` : "リセット時刻を取得できません"}</small>
-              </div>;
-            })}</div> : <div className="usage-empty">{rateLimitsError ? "利用枠を取得できませんでした。更新してください。" : "利用枠の情報はありません。"}</div>}
-            <p className="usage-footnote">Codexアカウントから取得した利用枠の消費割合です。</p>
-          </section>
-          <Separator className="usage-separator" />
-          <section className="terminal-usage-section">
-            <div className="usage-section-heading"><h3>ターミナル別トークン使用量</h3><span>{sortedTasks.length}件</span></div>
-            <div className="terminal-usage-list">
-              {sortedTasks.length ? sortedTasks.map((task) => <article className="terminal-usage-item" key={task.id}>
-                <div className="terminal-usage-item-top">
-                  <span className="terminal-usage-task"><strong title={task.title}>{task.title}</strong><small title={task.cwd}>{getFolderName(task.cwd)}{task.closed ? " · 非表示" : ""}</small></span>
-                  <span className="terminal-usage-total"><strong>{numberLabel(task.usage?.totalTokens || 0)}</strong><small>合計 tokens</small></span>
-                </div>
-                <div className="terminal-usage-breakdown"><span><small>入力</small><strong>{numberLabel(task.usage?.inputTokens || 0)}</strong><em>tokens</em></span><span><small>出力</small><strong>{numberLabel(task.usage?.outputTokens || 0)}</strong><em>tokens</em></span></div>
-              </article>) : <div className="usage-empty">ターミナルがありません。</div>}
-            </div>
-          </section>
-          <Separator className="usage-separator" />
-          <div className="usage-panel-heading"><div><h3>トークン使用量</h3></div><span className="usage-live-tag"><CircleDot size={10} /> このアプリ</span></div>
-          <div className="usage-total"><strong>{numberLabel(usageTotals.totalTokens)}</strong><span>tokens</span><small>履歴の合計</small></div>
-          <div className="usage-bar"><span className="usage-input-bar" style={{ width: `${usageTotals.totalTokens ? usageTotals.inputTokens / usageTotals.totalTokens * 100 : 0}%` }} /><span className="usage-output-bar" style={{ width: `${usageTotals.totalTokens ? usageTotals.outputTokens / usageTotals.totalTokens * 100 : 0}%` }} /></div>
-          <div className="usage-legend"><span><i className="legend-input" />入力</span><span><i className="legend-output" />出力</span></div>
-          <div className="usage-breakdown"><div><span>入力トークン</span><strong>{numberLabel(usageTotals.inputTokens)}</strong></div><div><span>出力トークン</span><strong>{numberLabel(usageTotals.outputTokens)}</strong></div><div><span>キャッシュ入力</span><strong>{numberLabel(usageTotals.cachedInputTokens)}</strong></div><div><span>完了ターン</span><strong>{numberLabel(usageTotals.turns)}</strong></div></div>
-          <div className="usage-footnote">CLIが各ターンで返したトークン数の履歴合計です。</div>
-        </CardContent></Card>
+      <dialog ref={usageRef} className="app-dialog usage-dialog" onCancel={(event) => { event.preventDefault(); setUsageOpen(false); }} onClose={() => setUsageOpen(false)} onClick={(event) => { if (event.target === event.currentTarget) setUsageOpen(false); }}>
+        <div className="dialog-card">
+          <div className="dialog-heading"><div><div className="dialog-kicker">CODEX ACCOUNT</div><h2>使用量</h2><p>Codexアカウントの残り利用枠です。</p></div><div className="dialog-heading-actions"><button className="icon-button" type="button" aria-label="利用枠を更新" title="利用枠を更新" onClick={() => void refreshUsage()} disabled={rateLimitsLoading}><RefreshCw size={15} className={rateLimitsLoading ? "spin" : ""} /></button><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setUsageOpen(false)}><X size={17} /></button></div></div>
+          {rateLimitsLoading && !rateLimits ? <div className="dialog-state"><LoaderCircle size={16} className="spin" />利用枠を取得しています…</div> : rateWindows.length ? <div className="rate-window-list">{rateWindows.map((window, index) => {
+            const used = Math.max(0, Math.min(100, window.usedPercent));
+            const remaining = 100 - used;
+            const kind = used >= 90 ? " is-critical" : used >= 70 ? " is-warning" : "";
+            return <section className={"rate-window" + kind} key={window.windowDurationMins || index}>
+              <div className="rate-window-heading"><span>{windowLabel(window)}</span><strong>{Math.round(remaining)}% <small>残り</small></strong></div>
+              <div className="rate-window-track"><span style={{ width: used + "%" }} /></div>
+              <div className="rate-window-foot"><span>{Math.round(used)}% 使用済み</span><small>リセット {resetLabel(window.resetsAt)}</small></div>
+            </section>;
+          })}</div> : <div className="dialog-state is-error">{rateLimitsError || "利用枠の情報を取得できませんでした。"}</div>}
+          <div className="usage-note"><CircleDot size={12} />使用済み割合はCodexアカウントから取得しています。</div>
+        </div>
       </dialog>
 
-      {toast && <div className={`toast ${toast.error ? "is-error" : ""}`} role="status">{toast.message}</div>}
+      {toast && <div className={"toast" + (toast.error ? " is-error" : "")} role="status">{toast.message}</div>}
     </div>
   );
 }

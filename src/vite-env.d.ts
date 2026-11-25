@@ -1,37 +1,41 @@
 /// <reference types="vite/client" />
 
-export interface RunLog {
-  id: string;
-  kind: "user" | "assistant" | "activity" | "command" | "system" | "notice" | "error";
-  text: string;
-  at: string;
-}
+export type SessionCli = "claude" | "codex";
+export type SessionStatus = "idle" | "running" | "completed" | "approval" | "exited";
 
-export interface RunTask {
+export interface CimLineSession {
   id: string;
   title: string;
-  prompt: string;
   cwd: string;
-  worktree: boolean;
-  runner?: "app-server" | "exec";
-  usage: TokenUsage;
-  status: "running" | "stopping" | "completed" | "failed" | "stopped";
-  startedAt: string;
-  endedAt: string | null;
-  threadId: string | null;
-  exitCode: number | null;
-  logs: RunLog[];
+  cli: SessionCli;
   closed: boolean;
+  createdAt: string;
+  status: SessionStatus;
+  statusAt: string | null;
+  unreviewed: boolean;
 }
 
-export interface TokenUsage {
-  inputTokens: number;
-  cachedInputTokens: number;
-  cacheWriteInputTokens: number;
-  outputTokens: number;
-  reasoningOutputTokens: number;
-  totalTokens: number;
-  turns: number;
+export interface InitialState {
+  sessions: CimLineSession[];
+  cliAvailable: Record<SessionCli, boolean>;
+  defaultDirectory: string;
+}
+
+export interface PtySnapshot {
+  buffer: string;
+  sequence: number;
+}
+
+export interface PtyDataEvent {
+  sessionId: string;
+  data: string;
+  sequence: number;
+}
+
+export interface PtyExitEvent {
+  sessionId: string;
+  exitCode: number | null;
+  signal: number | null;
 }
 
 export interface CodexRateLimitWindow {
@@ -58,25 +62,25 @@ export interface CodexSkillsResult {
   warnings: string[];
 }
 
-export interface InitialState {
-  tasks: RunTask[];
-  cliAvailable: boolean;
-  defaultDirectory: string;
-}
-
 export interface CodexDeskApi {
+  platform: "win32" | "darwin" | "linux";
   getState: () => Promise<InitialState>;
   getRateLimits: () => Promise<CodexRateLimits>;
   getSkills: (projectPaths: string[]) => Promise<CodexSkillsResult>;
   chooseFolder: () => Promise<string | null>;
-  createTask: (input: { cwd: string; prompt: string; title?: string; worktree?: boolean }) => Promise<RunTask>;
-  continueTask: (id: string, prompt: string) => Promise<RunTask>;
-  stopTask: (id: string) => Promise<RunTask>;
-  stopAll: () => Promise<boolean>;
-  closeTask: (id: string) => Promise<RunTask>;
-  reopenTask: (id: string) => Promise<RunTask>;
-  deleteTask: (id: string) => Promise<boolean>;
-  onTasksUpdated: (callback: (tasks: RunTask[]) => void) => () => void;
+  createSession: (input: { cwd: string; cli: SessionCli }) => Promise<CimLineSession>;
+  closeSession: (id: string) => Promise<CimLineSession>;
+  reopenSession: (id: string) => Promise<CimLineSession>;
+  deleteSession: (id: string) => Promise<boolean>;
+  attachPty: (id: string) => Promise<PtySnapshot>;
+  writePty: (id: string, data: string) => Promise<void>;
+  resizePty: (id: string, cols: number, rows: number) => Promise<void>;
+  readClipboardText: () => Promise<string>;
+  writeClipboardText: (text: string) => Promise<void>;
+  setFocusedSession?: (id: string | null) => Promise<unknown>;
+  onSessionsUpdated: (callback: (sessions: CimLineSession[]) => void) => () => void;
+  onPtyData: (callback: (event: PtyDataEvent) => void) => () => void;
+  onPtyExit: (callback: (event: PtyExitEvent) => void) => () => void;
 }
 
 declare global {

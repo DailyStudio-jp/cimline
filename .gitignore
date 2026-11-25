@@ -2,6 +2,8 @@ node_modules/
 dist/
 release/
 *.tsbuildinfo
+.codex-attachments/
+.tmp-pty-smoke/
 .env
 .env.*
 !.env.example
