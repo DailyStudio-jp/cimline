@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, type DragEvent as ReactDragEvent } from "react";
+import { memo, useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { Terminal as TerminalIcon, X } from "lucide-react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -16,6 +16,7 @@ type PtyBridge = {
   onPtyExit?: (callback: (event: { sessionId: string; exitCode: number | null; signal: number | null }) => void) => () => void;
   readClipboardText?: () => Promise<string>;
   writeClipboardText?: (text: string) => Promise<void>;
+  getDroppedImagePaths?: (files: File[]) => string[];
 };
 
 type Props = {
@@ -37,10 +38,27 @@ function getBridge(): PtyBridge {
   return (window.codexDesk || {}) as unknown as PtyBridge;
 }
 
+const imageFilePattern = /\.(png|jpe?g|gif|webp|bmp|tiff?|heic|heif)$/i;
+
+function hasFileItems(event: ReactDragEvent<HTMLElement>) {
+  return Array.from(event.dataTransfer.items).some((item) => item.kind === "file")
+    || Array.from(event.dataTransfer.types).includes("Files");
+}
+
+function isSupportedImage(file: File) {
+  return imageFilePattern.test(file.name);
+}
+
+function formatDroppedPath(filePath: string, platform?: string) {
+  if (platform === "win32") return `"${filePath.replace(/"/g, "\\\"")}"`;
+  return "'" + filePath.replace(/'/g, "'\\''") + "'";
+}
+
 function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, dropTarget, onClose, onFocus, onDragStart, onDragOver, onDrop, onError }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const [imageDropActive, setImageDropActive] = useState(false);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -224,14 +242,76 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, 
   const unreviewed = session.unreviewed && (session.status === "completed" || session.status === "approval");
   const statusDescription = statusAge ? `${statusLabel} ${statusAge}` : statusLabel;
 
+  const handleImageDrop = (event: ReactDragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setImageDropActive(false);
+    const files = Array.from(event.dataTransfer.files).filter(isSupportedImage).slice(0, 10);
+    if (!files.length) {
+      onError("PNG、JPEG、GIF、WebP、BMP、TIFF、HEICの画像をドロップしてください。");
+      return;
+    }
+    const bridge = getBridge();
+    if (typeof bridge.getDroppedImagePaths !== "function") {
+      onError("画像ドロップAPIがありません。CimLineを完全終了して再起動してください。");
+      return;
+    }
+    let paths: string[];
+    try {
+      paths = bridge.getDroppedImagePaths(files);
+    } catch (error) {
+      onError("画像パスを取得できません: " + String(error));
+      return;
+    }
+    if (!paths.length) {
+      onError("ドロップした画像のパスを取得できませんでした。");
+      return;
+    }
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    paths.forEach((filePath, index) => {
+      const separator = index > 0 ? " " : "";
+      terminal.paste(separator + formatDroppedPath(filePath, bridge.platform));
+    });
+    terminal.focus();
+    onFocus(session.id);
+  };
+
   return (
     <article
       className={"terminal-pane" + (dragging ? " is-dragging" : "") + (dropTarget ? " is-drop-target" : "") + (focused ? " is-focused" : "") + (unreviewed ? ` is-unreviewed is-unreviewed-${session.status}` : "")}
       aria-label={(session.cli === "codex" ? "Codex" : "Claude") + " terminal " + session.title}
       onMouseDown={() => onFocus(session.id)}
       onFocusCapture={() => onFocus(session.id)}
-      onDragOver={(event) => onDragOver(session.id, event)}
-      onDrop={(event) => onDrop(session.id, event)}
+      onDragEnter={(event) => {
+        if (!hasFileItems(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setImageDropActive(true);
+      }}
+      onDragOver={(event) => {
+        if (!hasFileItems(event)) {
+          onDragOver(session.id, event);
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "copy";
+        setImageDropActive(true);
+      }}
+      onDragLeave={(event) => {
+        if (!hasFileItems(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setImageDropActive(false);
+      }}
+      onDrop={(event) => {
+        if (!hasFileItems(event)) {
+          onDrop(session.id, event);
+          return;
+        }
+        handleImageDrop(event);
+      }}
     >
       <header className="terminal-titlebar" draggable onDragStart={(event) => onDragStart(session.id, event)}>
         <div className="terminal-lights" aria-hidden="true"><i /><i /><i /></div>
@@ -249,7 +329,10 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, 
         </div>
         <button className="terminal-close" type="button" title="ターミナルを閉じる" aria-label={session.title + " を閉じる"} onDragStart={(event) => event.preventDefault()} onClick={(event) => { event.stopPropagation(); onClose(session.id); }}><X size={16} /></button>
       </header>
-      <div className="terminal-body"><div ref={hostRef} className="xterm-host" /></div>
+      <div className="terminal-body">
+        {imageDropActive && <div className="image-drop-overlay" aria-hidden="true">画像をドロップして添付</div>}
+        <div ref={hostRef} className="xterm-host" />
+      </div>
     </article>
   );
 }

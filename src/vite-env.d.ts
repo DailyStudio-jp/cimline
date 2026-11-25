@@ -77,6 +77,7 @@ export interface CodexDeskApi {
   resizePty: (id: string, cols: number, rows: number) => Promise<void>;
   readClipboardText: () => Promise<string>;
   writeClipboardText: (text: string) => Promise<void>;
+  getDroppedImagePaths?: (files: File[]) => string[];
   setFocusedSession?: (id: string | null) => Promise<unknown>;
   onSessionsUpdated: (callback: (sessions: CimLineSession[]) => void) => () => void;
   onPtyData: (callback: (event: PtyDataEvent) => void) => () => void;

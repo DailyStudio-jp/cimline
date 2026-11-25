@@ -1,4 +1,21 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
+
+const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp|tiff?|heic|heif)$/i;
+
+function getDroppedImagePaths(files) {
+  if (!Array.isArray(files)) return [];
+  return files.slice(0, 10).flatMap((file) => {
+    try {
+      if (!file || typeof file.name !== "string" || !IMAGE_EXTENSIONS.test(file.name)) return [];
+      const filePath = webUtils.getPathForFile(file);
+      return typeof filePath === "string" && filePath.length > 0 && filePath.length <= 32768 && !/[\u0000-\u001f\u007f]/.test(filePath)
+        ? [filePath]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+}
 
 function subscribe(channel, callback) {
   if (typeof callback !== "function") throw new TypeError("callback must be a function");
@@ -22,6 +39,7 @@ contextBridge.exposeInMainWorld("codexDesk", {
   resizePty: (id, columns, rows) => ipcRenderer.invoke("pty:resize", id, columns, rows),
   readClipboardText: () => ipcRenderer.invoke("clipboard:read-text"),
   writeClipboardText: (text) => ipcRenderer.invoke("clipboard:write-text", text),
+  getDroppedImagePaths,
   platform: process.platform,
   onSessionsUpdated: (callback) => subscribe("sessions:updated", callback),
   onPtyData: (callback) => subscribe("pty:data", callback),
