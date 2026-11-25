@@ -24,8 +24,6 @@ import { Separator } from "@/components/ui/separator";
 type CliKind = "codex" | "claude";
 type RateWindow = { usedPercent: number; windowDurationMins: number | null; resetsAt: number | null };
 type RateLimits = { primary: RateWindow | null; secondary: RateWindow | null };
-type Skill = { name: string; description: string; scope: "user" | "project" | "system" | "plugin" | "codex-home"; path: string; projectPath?: string };
-type SkillResult = { skills: Skill[]; warnings: string[] };
 type AppState = { sessions: TerminalSession[]; cliAvailable: { codex: boolean; claude: boolean }; defaultDirectory: string };
 type CimLineBridge = {
   getState?: () => Promise<AppState>;
@@ -37,7 +35,6 @@ type CimLineBridge = {
   onSessionsUpdated?: (callback: (sessions: TerminalSession[]) => void) => () => void;
   setFocusedSession?: (id: string | null) => Promise<unknown>;
   getRateLimits?: () => Promise<RateLimits>;
-  getSkills?: (projectPaths: string[]) => Promise<SkillResult>;
 };
 type RecentFolder = { path: string; name: string };
 const recentFolderStorageKey = "cimline-recent-folders";
@@ -151,12 +148,7 @@ export default function App() {
   const [reviewingSessionId, setReviewingSessionId] = useState<string | null>(null);
   const [statusClock, setStatusClock] = useState(() => Date.now());
   const [composerOpen, setComposerOpen] = useState(false);
-  const [skillsOpen, setSkillsOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [skillWarnings, setSkillWarnings] = useState<string[]>([]);
-  const [skillsLoading, setSkillsLoading] = useState(false);
-  const [skillsError, setSkillsError] = useState("");
   const [rateLimits, setRateLimits] = useState<RateLimits | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
   const [rateLimitsError, setRateLimitsError] = useState("");
@@ -168,7 +160,6 @@ export default function App() {
   const [dropTargetSessionId, setDropTargetSessionId] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLDialogElement>(null);
-  const skillsRef = useRef<HTMLDialogElement>(null);
   const usageRef = useRef<HTMLDialogElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusedSessionIdRef = useRef<string | null>(null);
@@ -282,13 +273,6 @@ export default function App() {
       requestAnimationFrame(() => document.getElementById("new-session-folder")?.focus());
     } else if (!composerOpen && dialog.open) dialog.close();
   }, [composerOpen]);
-
-  useEffect(() => {
-    const dialog = skillsRef.current;
-    if (!dialog) return;
-    if (skillsOpen && !dialog.open) dialog.showModal();
-    else if (!skillsOpen && dialog.open) dialog.close();
-  }, [skillsOpen]);
 
   useEffect(() => {
     const dialog = usageRef.current;
@@ -493,35 +477,10 @@ export default function App() {
     setDropTargetSessionId(null);
   }, [draggingSessionId, sortedActiveSessions]);
 
-  async function openSkills() {
-    setSkillsOpen(true);
-    setSkillsLoading(true);
-    setSkillsError("");
-    try {
-      const api = bridge();
-      if (typeof api.getSkills !== "function") throw new Error("スキル取得APIがありません。CimLineを完全終了して再起動してください。");
-      const paths = Array.from(new Set(sessions.map((session) => session.cwd).concat(recentFolders.map((folder) => folder.path)))).slice(0, 24);
-      const result = await api.getSkills(paths);
-      setSkills(result.skills || []);
-      setSkillWarnings(result.warnings || []);
-    } catch (error) {
-      setSkillsError(errorText(error));
-    } finally {
-      setSkillsLoading(false);
-    }
-  }
-
   function showUsage() {
     setUsageOpen(true);
     void refreshUsage();
   }
-
-  const skillGroups: Array<{ scope: Skill["scope"] | "codex-home"; label: string }> = [
-    { scope: "user", label: "ユーザー" },
-    { scope: "project", label: "プロジェクト" },
-    { scope: "system", label: "システム" },
-    { scope: "plugin", label: "プラグイン" },
-  ];
 
   return (
     <div className="app-shell">
@@ -530,7 +489,6 @@ export default function App() {
         <button className="sidebar-new" type="button" onClick={() => openComposer()}><Plus size={17} /><span>新しいターミナル</span><kbd>Ctrl N</kbd></button>
         <nav className="sidebar-nav" aria-label="メインメニュー">
           <button className="sidebar-nav-item is-active" type="button"><TerminalIcon size={16} /><span>ターミナル</span><span className="nav-count">{sessions.filter((session) => !session.closed).length}</span></button>
-          <button className="sidebar-nav-item" type="button" onClick={() => void openSkills()}><Sparkles size={15} /><span>スキル一覧</span></button>
           <button className="sidebar-nav-item" type="button" onClick={showUsage}><Activity size={15} /><span>使用量</span></button>
         </nav>
         <Separator className="sidebar-separator" />
@@ -664,28 +622,9 @@ export default function App() {
         </form>
       </dialog>
 
-      <dialog ref={skillsRef} className="app-dialog skills-dialog" onCancel={(event) => { event.preventDefault(); setSkillsOpen(false); }} onClose={() => setSkillsOpen(false)} onClick={(event) => { if (event.target === event.currentTarget) setSkillsOpen(false); }}>
-        <div className="dialog-card">
-          <div className="dialog-heading"><div><div className="dialog-kicker">LOCAL SKILLS</div><h2>スキル一覧</h2><p>ローカルとプラグインから見つかったCodexスキルです。</p></div><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setSkillsOpen(false)}><X size={17} /></button></div>
-          {skillsLoading ? <div className="dialog-state"><LoaderCircle size={16} className="spin" />スキルを読み込んでいます…</div> : skillsError ? <div className="dialog-state is-error">{skillsError}</div> : (
-            <>
-              <div className="skills-content">
-                {skillGroups.map((group) => {
-                  const items = skills.filter((skill) => group.scope === "user" ? skill.scope === "user" || skill.scope === "codex-home" : skill.scope === group.scope);
-                  if (!items.length) return null;
-                  return <section className="skill-group" key={group.scope}><div className="skill-group-heading"><h3>{group.label}</h3><span>{items.length}</span></div><div className="skill-list">{items.map((skill) => <article className="skill-item" key={skill.path + skill.name}><div><strong>{skill.name}</strong><span className={"skill-scope is-" + skill.scope}>{group.label}</span></div><p>{skill.description || "説明はありません。"}</p><small title={skill.projectPath || skill.path}>{skill.projectPath || skill.path}</small></article>)}</div></section>;
-                })}
-                {skills.length === 0 && <div className="dialog-state">スキルは見つかりませんでした。</div>}
-              </div>
-              {skillWarnings.length > 0 && <section className="skill-warnings"><h3>確認事項</h3><ul>{skillWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></section>}
-            </>
-          )}
-        </div>
-      </dialog>
-
       <dialog ref={usageRef} className="app-dialog usage-dialog" onCancel={(event) => { event.preventDefault(); setUsageOpen(false); }} onClose={() => setUsageOpen(false)} onClick={(event) => { if (event.target === event.currentTarget) setUsageOpen(false); }}>
         <div className="dialog-card">
-          <div className="dialog-heading"><div><div className="dialog-kicker">CODEX ACCOUNT</div><h2>使用量</h2><p>Codexアカウントの残り利用枠です。</p></div><div className="dialog-heading-actions"><button className="icon-button" type="button" aria-label="利用枠を更新" title="利用枠を更新" onClick={() => void refreshUsage()} disabled={rateLimitsLoading}><RefreshCw size={15} className={rateLimitsLoading ? "spin" : ""} /></button><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setUsageOpen(false)}><X size={17} /></button></div></div>
+          <div className="dialog-heading"><div><div className="dialog-kicker">CODEX CLI</div><h2>使用量</h2><p>Codex CLIから5時間枠と週間枠を取得します。</p></div><div className="dialog-heading-actions"><button className="icon-button" type="button" aria-label="利用枠を更新" title="利用枠を更新" onClick={() => void refreshUsage()} disabled={rateLimitsLoading}><RefreshCw size={15} className={rateLimitsLoading ? "spin" : ""} /></button><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setUsageOpen(false)}><X size={17} /></button></div></div>
           {rateLimitsLoading && !rateLimits ? <div className="dialog-state"><LoaderCircle size={16} className="spin" />利用枠を取得しています…</div> : rateWindows.length ? <div className="rate-window-list">{rateWindows.map((window, index) => {
             const used = Math.max(0, Math.min(100, window.usedPercent));
             const remaining = 100 - used;
@@ -696,7 +635,7 @@ export default function App() {
               <div className="rate-window-foot"><span>{Math.round(used)}% 使用済み</span><small>リセット {resetLabel(window.resetsAt)}</small></div>
             </section>;
           })}</div> : <div className="dialog-state is-error">{rateLimitsError || "利用枠の情報を取得できませんでした。"}</div>}
-          <div className="usage-note"><CircleDot size={12} />使用済み割合はCodexアカウントから取得しています。</div>
+          <div className="usage-note"><CircleDot size={12} />Codex CLIの5時間・週間利用枠を表示しています。</div>
         </div>
       </dialog>
 

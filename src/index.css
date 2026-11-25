@@ -203,24 +203,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #a6ca69; outline-
 .text-button:hover { color: #f1f2e9; }
 .inline-error { display: flex; align-items: center; gap: 7px; margin: 0 0 14px; padding: 9px 10px; border: 1px solid #64453c; border-radius: 5px; color: #efaa9b; background: #241b17; font-size: 11px; line-height: 1.5; }
 
-.skills-dialog { width: min(850px, calc(100vw - 34px)); }
-.skills-content { max-height: min(55vh, 510px); overflow: auto; padding-right: 3px; }
-.skill-group { margin: 0 0 20px; }
-.skill-group-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; padding-bottom: 7px; border-bottom: 1px solid #30332b; }
-.skill-group-heading h3, .skill-warnings h3 { margin: 0; color: #d4d8cb; font-size: 13px; font-weight: 600; }
-.skill-group-heading > span { color: #a9b68c; font: 11px var(--font-mono); }
-.skill-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
-.skill-item { min-width: 0; padding: 10px 11px; border: 1px solid #30332b; border-radius: 5px; background: #151613; }
-.skill-item > div { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; }
-.skill-item strong { overflow: hidden; color: #dce2cf; font: 600 12px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.skill-item p { margin: 7px 0 9px; color: #a0a496; font-size: 11px; line-height: 1.5; }
-.skill-item small { display: block; overflow: hidden; color: #83877a; font: 10px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.skill-scope { flex: 0 0 auto; padding: 2px 5px; border: 1px solid #3e4237; border-radius: 3px; color: #aeb49d; font-size: 9px; }
-.skill-scope.is-plugin { border-color: #4d6541; color: #c3dfa4; }
-.skill-scope.is-project { color: #aac3e4; }
-.skill-scope.is-system { color: #d7c48d; }
-.skill-warnings { margin-top: 15px; padding: 11px 12px; border: 1px solid #554b32; border-radius: 5px; color: #d9c996; background: #211e15; font-size: 11px; }
-.skill-warnings ul { margin: 8px 0 0; padding-left: 17px; line-height: 1.6; }
 .dialog-state { display: flex; min-height: 100px; align-items: center; justify-content: center; gap: 9px; color: #afb3a5; font-size: 13px; line-height: 1.6; text-align: center; }
 .dialog-state.is-error { color: #eaa093; }
 

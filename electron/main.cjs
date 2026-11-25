@@ -7,6 +7,7 @@ const path = require("node:path");
 const { randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { fileURLToPath } = require("node:url");
 const pty = require("node-pty");
+const { selectCodexRateLimits } = require("./rate-limits.cjs");
 
 const sessions = new Map();
 const livePtys = new Map();
@@ -444,19 +445,6 @@ function getNodeBinary() {
   return process.env.CODEX_NODE_EXE || resolveOnPath("node.exe") || resolveOnPath("node") || (process.platform === "win32" ? "node.exe" : "node");
 }
 
-function normalizeRateLimitWindow(window) {
-  if (!window || typeof window !== "object") return null;
-  const usedPercent = Number(window.usedPercent ?? window.used_percent);
-  if (!Number.isFinite(usedPercent)) return null;
-  const duration = window.windowDurationMins ?? window.window_duration_mins;
-  const resetsAt = window.resetsAt ?? window.resets_at;
-  return {
-    usedPercent,
-    windowDurationMins: duration == null ? null : Number(duration),
-    resetsAt: resetsAt == null ? null : Number(resetsAt),
-  };
-}
-
 function redactRateLimitDiagnostic(value) {
   return String(value || "")
     .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
@@ -536,7 +524,7 @@ async function getCodexRateLimits() {
             initialized = true;
             releaseStartupOnce();
             send({ method: "initialized", params: {} });
-            send({ id: rateLimitRequestId, method: "account/rateLimits/read", params: { supportsLunaReserve: true } });
+            send({ id: rateLimitRequestId, method: "account/rateLimits/read", params: { supportsLunaReserve: false } });
           }
           continue;
         }
@@ -552,9 +540,9 @@ async function getCodexRateLimits() {
           fail("Codexの利用枠情報の取得に失敗しました" + errorCode + ": " + (message.error.message || "詳細不明"));
           return;
         }
-        const snapshot = message.result?.rateLimits ?? message.result?.rate_limits;
-        if (!snapshot) { fail("Codex app-serverの応答にrateLimitsが含まれていません。"); return; }
-        finish(null, { primary: normalizeRateLimitWindow(snapshot.primary), secondary: normalizeRateLimitWindow(snapshot.secondary) });
+        const rateLimits = selectCodexRateLimits(message.result);
+        if (!rateLimits) { fail("Codex app-serverの応答にCodexの利用枠が含まれていません。"); return; }
+        finish(null, rateLimits);
         return;
       }
     });
@@ -1666,7 +1654,6 @@ function registerIpc() {
     defaultDirectory: process.env.CIMLINE_DEFAULT_PROJECT || process.env.CODEX_DEFAULT_PROJECT || (app.isPackaged ? app.getPath("documents") : process.cwd()),
   }));
   ipcMain.handle("usage:get-rate-limits", () => getCodexRateLimits());
-  ipcMain.handle("skills:list", (_event, projectPaths) => getSkills(projectPaths));
   ipcMain.handle("dialog:choose-folder", async () => {
     const options = {
       title: "作業フォルダーを選択",

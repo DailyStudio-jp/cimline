@@ -49,24 +49,10 @@ export interface CodexRateLimits {
   secondary: CodexRateLimitWindow | null;
 }
 
-export interface CodexSkill {
-  name: string;
-  description: string;
-  scope: "user" | "project" | "system" | "codex-home" | "plugin";
-  path: string;
-  projectPath?: string;
-}
-
-export interface CodexSkillsResult {
-  skills: CodexSkill[];
-  warnings: string[];
-}
-
 export interface CodexDeskApi {
   platform: "win32" | "darwin" | "linux";
   getState: () => Promise<InitialState>;
   getRateLimits: () => Promise<CodexRateLimits>;
-  getSkills: (projectPaths: string[]) => Promise<CodexSkillsResult>;
   chooseFolder: () => Promise<string | null>;
   createSession: (input: { cwd: string; cli: SessionCli }) => Promise<CimLineSession>;
   closeSession: (id: string) => Promise<CimLineSession>;

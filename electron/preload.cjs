@@ -27,7 +27,6 @@ function subscribe(channel, callback) {
 contextBridge.exposeInMainWorld("codexDesk", {
   getState: () => ipcRenderer.invoke("app:get-state"),
   getRateLimits: () => ipcRenderer.invoke("usage:get-rate-limits"),
-  getSkills: (projectPaths) => ipcRenderer.invoke("skills:list", projectPaths),
   chooseFolder: () => ipcRenderer.invoke("dialog:choose-folder"),
   createSession: (input) => ipcRenderer.invoke("sessions:create", input),
   closeSession: (id) => ipcRenderer.invoke("sessions:close", id),
