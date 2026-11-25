@@ -550,7 +550,6 @@ export default function App() {
           </div>
           <div className="topbar-right">
             <span className="connection-badge"><span className="connection-dot" />ローカル接続</span>
-            <button className="topbar-new" type="button" onClick={() => openComposer()}><Plus size={15} />新規</button>
           </div>
         </header>
         {bridgeError && <div className="bridge-error"><AlertCircle size={15} /><span>{bridgeError}</span></div>}
