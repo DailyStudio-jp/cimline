@@ -1,100 +1,110 @@
 # CimLine
 
-CimLine is a desktop workspace for running Claude Code and Codex CLI in real, independent terminal sessions. Each pane uses `node-pty` and xterm.js, so input, approval prompts, and CLI slash commands behave as they do in a regular shell. The dashboard keeps a two-column layout, searchable session history, recently used folders, and drag-and-drop ordering.
+CimLineは、Claude CodeとCodex CLIを独立した実端末セッションで使えるデスクトップアプリです。各ターミナルは`node-pty`とxterm.jsで動作し、通常のシェルと同じようにコマンド入力や承認、CLIのスラッシュコマンドを扱えます。ターミナルをグリッド表示でき、セッション履歴の検索、最近使ったフォルダー、ドラッグによる並べ替えにも対応しています。
 
-The app also shows Codex account usage limits (5-hour and weekly windows) and lists locally available Codex skills. Those features use the installed Codex CLI configuration; the app does not store API keys or credentials in the project.
+Codexアカウントの利用枠（5時間・週間）や、ローカルにインストールされたCodexスキルとプラグインも確認できます。認証情報はCimLineに保存せず、インストール済みCodex CLIの設定を利用します。
 
-## Requirements
+## 動作条件
 
-- Windows or macOS
-- At least one CLI installed and authenticated: `codex` or `claude`
-- PowerShell (`pwsh`, with `powershell.exe` as fallback) on Windows, or a login shell on macOS
-- Node.js 24 or later with npm, when running CimLine from this source repository. The launch scripts can install Node.js when WinGet (Windows) or Homebrew (macOS) is available.
+- WindowsまたはmacOS
+- `codex`または`claude`のCLIを1つ以上インストールし、サインイン済みであること
+- WindowsではPowerShell 7（`pwsh`。ない場合はWindows PowerShellを使用）
+- macOSではログインシェル
+- ソースから起動する場合はNode.js 24以降とnpmが必要です。起動スクリプトからNode.jsを自動導入できます
 
-## First-time setup
+## 初回セットアップ
 
-Install and sign in to at least one CLI using its official instructions: [Codex CLI](https://github.com/openai/codex#installing-and-running-codex-cli) or [Claude Code](https://code.claude.com/docs/en/setup). CimLine does not install these CLI tools or sign in to them.
+まず、使うCLIを1つ以上インストールしてサインインしてください。公式手順はこちらです。
 
-On source launch, the scripts check for Node.js 24 or later with npm. If it is missing, `start-cimline.bat` tries to install the current LTS with WinGet on Windows, and `start-cimline.command` tries Homebrew on macOS. WinGet may show package prompts or a system approval prompt; Homebrew must already be installed. If automatic installation is unavailable or fails, the script opens the [Node.js download page](https://nodejs.org/en/download/).
+- [Codex CLIのインストール](https://github.com/openai/codex#installing-and-running-codex-cli)
+- [Claude Codeのインストール](https://code.claude.com/docs/en/setup)
 
-On the first source launch, both scripts run `npm install` when CimLine's local dependencies are missing. This downloads the dependencies into `node_modules`.
+CimLineはCLIのインストールやサインインを行いません。
 
-The Node.js requirement applies to running from the source repository. It is not needed to run a packaged CimLine installer; a Codex or Claude CLI installation is still required.
+ソースから起動すると、起動スクリプトがNode.js 24以降とnpmを確認します。Node.jsが見つからない場合、WindowsではWinGetでNode.js LTSの導入を試し、macOSではHomebrewでNode.jsを導入します。WinGetではパッケージの確認やシステムの承認が表示されることがあります。macOSではHomebrewがあらかじめインストールされている必要があります。自動導入が使えない場合や失敗した場合は、[Node.js公式ダウンロードページ](https://nodejs.org/en/download/)が開きます。
 
-## Development
+初回起動時にCimLineの依存パッケージがまだない場合は、起動スクリプトが`npm install`を実行して`node_modules`にダウンロードします。
 
-```powershell
+Node.jsが必要なのはソースから起動するときだけです。パッケージ版の起動にはNode.jsは不要ですが、CodexまたはClaudeのCLIは必要です。
+
+## 開発
+
+手動で起動する場合は、リポジトリのフォルダーで次を実行します。
+
+```sh
 npm install
 npm run dev
 ```
 
-On Windows, double-click [`start-cimline.bat`](./start-cimline.bat) to install missing project dependencies and start the development app.
+Windowsでは[`start-cimline.bat`](./start-cimline.bat)をダブルクリックすると、必要なNode.jsと依存パッケージを確認して開発版を起動します。
 
-On macOS, double-click [`start-cimline.command`](./start-cimline.command) in Finder to install missing project dependencies and start the development app in Terminal. If a change affects `electron/main.cjs` or `electron/preload.cjs`, fully stop and restart the app; Vite hot reload only updates the renderer.
+macOSではFinderから[`start-cimline.command`](./start-cimline.command)をダブルクリックすると、必要なNode.jsと依存パッケージを確認してターミナル上で開発版を起動します。`electron/main.cjs`または`electron/preload.cjs`を変更した場合は、アプリを完全に終了して再起動してください。Viteのホットリロードは画面部分だけを更新します。
 
-## Keyboard shortcuts
+## キーボードショートカット
 
-| Shortcut | Action |
+| キー操作 | 動作 |
 | --- | --- |
-| `/` | Focus terminal search when a text field or dialog is not active |
-| `Ctrl+N` on Windows; `Cmd+N` on macOS | Open the new terminal dialog |
-| `Ctrl` + `+` / `-` / `0` on Windows; `Cmd` + `+` / `-` / `0` on macOS | Zoom in / out / reset |
-| `Ctrl` + wheel on Windows; `Ctrl` or `Cmd` + wheel, or pinch on macOS | Change the terminal grid from 1 to 6 columns |
-| `Alt` + wheel anywhere in the workspace | Scroll the workspace |
-| Windows: `Ctrl+C` | Copy selected text; with no selection, send Ctrl+C to the CLI |
-| Windows: `Ctrl+Shift+C`, `Ctrl+V`, `Ctrl+Shift+V` | Copy selection, paste, paste |
-| macOS: `Cmd+C`, `Cmd+V` | Copy selected text, paste; `Cmd+C` with no selection is ignored |
-| macOS: `Ctrl+C` | Send Ctrl+C to the CLI |
-| Any platform: right-click in a terminal | Copy selected text, or paste when there is no selection |
+| `/` | 入力欄やダイアログにフォーカスしていないとき、ターミナル検索にフォーカス |
+| Windows：`Ctrl+N`／macOS：`Cmd+N` | 新しいターミナルのダイアログを開く |
+| Windows：`Ctrl`+`+`／`-`／`0`、macOS：`Cmd`+`+`／`-`／`0` | 表示を拡大／縮小／リセット |
+| Windows：`Ctrl`+マウスホイール、macOS：`Ctrl`または`Cmd`+マウスホイール、ピンチ | ターミナルの列数を1〜6列に変更 |
+| ワークスペース内で`Alt`+マウスホイール | ワークスペースをスクロール |
+| Windows：`Ctrl+C` | 選択中の文字をコピー。選択がなければCLIへ`Ctrl+C`を送信 |
+| Windows：`Ctrl+Shift+C`／`Ctrl+V`／`Ctrl+Shift+V` | 選択範囲をコピー／貼り付け／貼り付け |
+| macOS：`Cmd+C`／`Cmd+V` | 選択範囲をコピー／貼り付け。選択がないときの`Cmd+C`は無視 |
+| macOS：`Ctrl+C` | CLIへ`Ctrl+C`を送信 |
+| 全OS：ターミナルを右クリック | 選択中の文字をコピー。選択がなければ貼り付け |
 
-Other terminal keys are passed through to the selected CLI, except for the app-level shortcuts above.
+アプリのショートカット以外のキー入力は、選択中のCLIへ送られます。
 
-## Build installers
+## インストーラーの作成
+
+Windows用：
 
 ```powershell
 npm run package:win
 ```
 
-On macOS:
+macOS用：
 
 ```sh
 npm run package:mac
 ```
 
-Installers are written to `release/`. `node-pty` is a native dependency and is unpacked from the Electron archive. If its binary needs to be rebuilt for the local Electron version, run:
+インストーラーは`release/`に出力されます。`node-pty`はネイティブ依存のため、Electronのアーカイブから展開して使います。ローカルのElectronに合わせてバイナリを再ビルドする場合は、次を実行してください。
 
 ```sh
 npm run rebuild:native
 ```
 
-## CLI and shell selection
+## CLIとシェルの設定
 
-The app detects `codex` and `claude` on `PATH` by default. Set these environment variables before launching CimLine to override detection or select a shell:
+CimLineは既定で`PATH`上の`codex`と`claude`を検出します。起動時に次の環境変数を設定すると、検出するCLIや使用するシェルを変更できます。
 
-| Variable | Purpose |
+| 環境変数 | 用途 |
 | --- | --- |
-| `CIMLINE_SHELL` | Shell executable to use for sessions |
-| `CIMLINE_CODEX_CMD` | Codex command name or path |
-| `CIMLINE_CLAUDE_CMD` | Claude Code command name or path |
-| `CIMLINE_DEFAULT_PROJECT` | Initial folder; `CODEX_DEFAULT_PROJECT` is also accepted |
-| `CODEX_CLI_JS` / `CODEX_NODE_EXE` | Codex CLI script and Node executable for account usage and skill discovery |
+| `CIMLINE_SHELL` | セッションで使うシェルの実行ファイル |
+| `CIMLINE_CODEX_CMD` | Codexのコマンド名またはパス |
+| `CIMLINE_CLAUDE_CMD` | Claude Codeのコマンド名またはパス |
+| `CIMLINE_DEFAULT_PROJECT` | 最初に開くフォルダー。`CODEX_DEFAULT_PROJECT`も使用できます |
+| `CODEX_CLI_JS`／`CODEX_NODE_EXE` | 利用枠やスキルの取得に使うCodex CLIのスクリプトとNode.js |
 
-Windows defaults to PowerShell 7 (`pwsh`) and falls back to Windows PowerShell. macOS uses the user's login shell and falls back to `/bin/zsh`. CimLine starts the selected CLI in the chosen folder. New sessions launch the CLI normally; reopening a session runs `codex resume --last` or `claude --continue` in that folder.
+WindowsではPowerShell 7（`pwsh`）を優先し、ない場合はWindows PowerShellを使います。macOSではユーザーのログインシェルを使い、取得できない場合は`/bin/zsh`を使います。新規セッションは選択したフォルダーでCLIを通常起動します。履歴から再開すると、同じフォルダーで`codex resume --last`または`claude --continue`を実行します。
 
-## Session history
+## セッション履歴
 
-Closing a pane stops its shell process tree but keeps the folder, CLI choice, and session metadata in `sessions.json` under Electron's user-data directory. Closed sessions stay in history and can be reopened or deleted. Active PTYs end when CimLine exits; they are not background jobs. Reopening starts a fresh shell and asks the selected CLI to continue its latest conversation.
+ターミナルを閉じるとシェルのプロセスツリーを終了します。フォルダー、CLIの種類、セッション情報はElectronのユーザーデータフォルダーにある`sessions.json`に保存され、履歴から再開または削除できます。CimLine終了時に実行中のPTYも終了し、バックグラウンドでは動き続けません。再開すると新しいシェルを起動し、選択したCLIに最新の会話を続けるよう指示します。
 
-## Session status and notifications
+## セッション状態と通知
 
-Pane status is tracked as idle, running, completed, approval-waiting, or exited. Claude Code reports prompt, completion, permission, and user-input events through a per-session settings file in CimLine's user-data directory. Codex reports completed turns through a per-run `notify` override; submitted non-empty terminal input marks a Codex pane as running. CimLine never edits `~/.claude/settings.json` or `~/.codex/config.toml`.
+ターミナルの状態は待機中、実行中、完了、承認待ち、終了として管理します。Claude Codeのプロンプト、完了、権限確認、ユーザー入力のイベントは、セッションごとにCimLineのユーザーデータフォルダーへ作成する設定ファイルで取得します。Codexは実行ごとの`notify`設定で完了を通知し、空でない入力を送ると実行中になります。CimLineは`~/.claude/settings.json`や`~/.codex/config.toml`を書き換えません。
 
-Hooks send only the pane ID and event name to a random-port HTTP listener bound to `127.0.0.1`. A per-launch random token, active-session check, and 8 KB request limit protect that listener. Hook stdin and Codex event text are discarded; prompts and terminal output are not written to session history. A completion or permission request in an unfocused pane is highlighted and counted until the pane is focused. The app also shows an OS notification when it is in the background.
+フックが送信するのはターミナルIDとイベント名だけです。待ち受けは毎回異なるポートで`127.0.0.1`に限定し、起動ごとのランダムトークン、アクティブなセッションの確認、8 KBのリクエスト上限で保護します。フックの標準入力やCodexのイベント本文は破棄され、プロンプトとターミナル出力はセッション履歴に保存されません。未確認のターミナルで完了または承認待ちになると、フォーカスするまで強調表示して件数を表示します。CimLineがバックグラウンドにあるときはOS通知も表示します。
 
-## Skills and plugins
+## スキルとプラグイン
 
-Codex CLI remains responsible for interactive `/` commands and `$` skill invocations inside a Codex terminal. CimLine's Skills view reads the local Codex skill and plugin cache for browsing. Account usage displays the 5-hour and weekly rate-limit windows reported by the Codex account API; the API reports used percentages and reset times, not a remaining-token count.
+Codexターミナル内の`/`コマンドや`$`によるスキル呼び出しは、Codex CLIが処理します。CimLineのスキル表示では、ローカルのCodexスキルとプラグインのキャッシュを参照します。利用量にはCodexアカウントAPIが返す5時間と週間の使用率・リセット時刻を表示します。このAPIから残りトークン数は取得できません。
 
-## Licenses
+## ライセンス
 
-CimLine is licensed under the MIT License; see [`LICENSE`](./LICENSE). Resolved third-party dependency versions and the license expressions recorded in `package-lock.json` are listed in [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md). That inventory reflects package metadata and does not verify each package's license text.
+CimLine本体はMIT Licenseで公開しています。詳細は[`LICENSE`](./LICENSE)を確認してください。依存パッケージの解決済みバージョンと、`package-lock.json`に記録されたライセンス表記は[`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md)にまとめています。この一覧はパッケージのメタデータに基づくもので、各ライセンス文書の内容までは確認していません。
