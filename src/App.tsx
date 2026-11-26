@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { TerminalPane, type TerminalSession } from "@/components/TerminalPane";
 import { countReviewFilterResults, filterActiveSessions, isUnreviewedTerminal, nextReviewingSessionIdAfterReopen, retainReviewingSessionId } from "@/session-filter.mjs";
+import { isSessionSortMode, sortSessions, type SessionSortMode } from "@/session-sort.mjs";
 import type { SessionStatus } from "@/vite-env";
 import { Separator } from "@/components/ui/separator";
 
@@ -41,6 +42,7 @@ type CimLineBridge = {
 type RecentFolder = { path: string; name: string };
 const recentFolderStorageKey = "cimline-recent-folders";
 const sessionOrderStorageKey = "cimline-session-order";
+const sessionSortStorageKey = "cimline-session-sort";
 const lastCliStorageKey = "cimline-last-cli";
 const sidebarCollapsedStorageKey = "cimline-sidebar-collapsed";
 
@@ -108,6 +110,9 @@ function normalizeSessions(value: unknown): TerminalSession[] {
       cli: item.cli,
       closed,
       createdAt: typeof item.createdAt === "string" ? item.createdAt : new Date(0).toISOString(),
+      completedAt: typeof item.completedAt === "string" && !Number.isNaN(Date.parse(item.completedAt))
+        ? item.completedAt
+        : item.status === "completed" && typeof item.statusAt === "string" && !Number.isNaN(Date.parse(item.statusAt)) ? item.statusAt : null,
       status: isSessionStatus(item.status) ? item.status : closed ? "exited" : "idle",
       statusAt: typeof item.statusAt === "string" && !Number.isNaN(Date.parse(item.statusAt)) ? item.statusAt : null,
       unreviewed: item.unreviewed === true,
@@ -143,6 +148,10 @@ export default function App() {
   const [defaultDirectory, setDefaultDirectory] = useState("");
   const [recentFolders, setRecentFolders] = useState<RecentFolder[]>(loadRecentFolders);
   const [sessionOrder, setSessionOrder] = useState<string[]>(() => readJson<string[]>(sessionOrderStorageKey, []));
+  const [sessionSortMode, setSessionSortMode] = useState<SessionSortMode>(() => {
+    const storedMode = readJson<unknown>(sessionSortStorageKey, "added-desc");
+    return isSessionSortMode(storedMode) ? storedMode : "added-desc";
+  });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readJson<boolean>(sidebarCollapsedStorageKey, false));
   const [search, setSearch] = useState("");
   const [showUnreviewedOnly, setShowUnreviewedOnly] = useState(false);
@@ -302,16 +311,8 @@ export default function App() {
 
   const sortedActiveSessions = useMemo(() => {
     const active = sessions.filter((session) => !session.closed);
-    const position = new Map(sessionOrder.map((id, index) => [id, index] as const));
-    return active.sort((left, right) => {
-      const leftIndex = position.get(left.id);
-      const rightIndex = position.get(right.id);
-      if (leftIndex !== undefined && rightIndex !== undefined) return leftIndex - rightIndex;
-      if (leftIndex !== undefined) return -1;
-      if (rightIndex !== undefined) return 1;
-      return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
-    });
-  }, [sessions, sessionOrder]);
+    return sortSessions(active, sessionOrder, sessionSortMode);
+  }, [sessions, sessionOrder, sessionSortMode]);
 
   const query = search.trim().toLowerCase();
   const filterOptions = { query, showUnreviewedOnly, reviewingSessionId };
@@ -563,6 +564,25 @@ export default function App() {
               <span className="review-filter-label">未確認のみ</span>
               <span className="review-filter-count" aria-hidden="true">{reviewFilterCount}</span>
             </button>
+            <label className="sort-control" title="ターミナルの自動並び替え">
+              <span>並び順</span>
+              <select
+                aria-label="ターミナルの並び順"
+                value={sessionSortMode}
+                onChange={(event) => {
+                  const mode = event.currentTarget.value;
+                  if (!isSessionSortMode(mode)) return;
+                  setSessionSortMode(mode);
+                  localStorage.setItem(sessionSortStorageKey, mode);
+                }}
+              >
+                <option value="added-asc">追加日時・古い順</option>
+                <option value="added-desc">追加日時・新しい順</option>
+                <option value="completed-asc">完了日時・古い順</option>
+                <option value="completed-desc">完了日時・新しい順</option>
+                <option value="manual">手動（ドラッグ）</option>
+              </select>
+            </label>
           </div>
           <div className="topbar-right">
             <span className="connection-badge"><span className="connection-dot" />ローカル接続</span>
@@ -579,6 +599,7 @@ export default function App() {
                   statusLabel={sessionStatusLabel(session.status)}
                   statusAge={statusAgeLabel(session.statusAt, statusClock)}
                   focused={focusedSessionId === session.id}
+                  reorderable={sessionSortMode === "manual"}
                   dragging={draggingSessionId === session.id}
                   dropTarget={dropTargetSessionId === session.id}
                   onClose={closeSession}

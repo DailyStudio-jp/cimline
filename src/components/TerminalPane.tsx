@@ -27,6 +27,7 @@ type Props = {
   statusLabel: string;
   statusAge: string;
   focused: boolean;
+  reorderable: boolean;
   dragging: boolean;
   dropTarget: boolean;
   onClose: (sessionId: string) => void;
@@ -46,7 +47,7 @@ function hasFileItems(event: ReactDragEvent<HTMLElement>) {
     || Array.from(event.dataTransfer.types).includes("Files");
 }
 
-function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, dropTarget, onClose, onFocus, onDragStart, onDragOver, onDrop, onError }: Props) {
+function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderable, dragging, dropTarget, onClose, onFocus, onDragStart, onDragOver, onDrop, onError }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -292,7 +293,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, 
 
   return (
     <article
-      className={"terminal-pane" + (dragging ? " is-dragging" : "") + (dropTarget ? " is-drop-target" : "") + (focused ? " is-focused" : "") + (unreviewed ? ` is-unreviewed is-unreviewed-${session.status}` : "")}
+      className={"terminal-pane" + (reorderable ? " is-reorderable" : "") + (dragging ? " is-dragging" : "") + (dropTarget ? " is-drop-target" : "") + (focused ? " is-focused" : "") + (unreviewed ? ` is-unreviewed is-unreviewed-${session.status}` : "")}
       aria-label={(session.cli === "codex" ? "Codex" : "Claude") + " terminal " + session.title}
       onMouseDown={() => onFocus(session.id)}
       onFocusCapture={() => onFocus(session.id)}
@@ -328,7 +329,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, 
         handleImageDrop(event);
       }}
     >
-      <header className="terminal-titlebar" draggable onDragStart={(event) => onDragStart(session.id, event)}>
+      <header className="terminal-titlebar" draggable={reorderable} onDragStart={(event) => { if (reorderable) onDragStart(session.id, event); else event.preventDefault(); }}>
         <div className="terminal-lights" aria-hidden="true"><i /><i /><i /></div>
         <div className="terminal-context">
           <TerminalIcon size={15} />
