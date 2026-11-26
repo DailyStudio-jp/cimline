@@ -18,6 +18,8 @@ npm install
 npm run dev
 ```
 
+On Windows, double-click [`start-cimline.bat`](./start-cimline.bat) to install missing dependencies and start the development app.
+
 On macOS, run the same commands from a terminal. If a change affects `electron/main.cjs` or `electron/preload.cjs`, fully stop and restart the app; Vite hot reload only updates the renderer.
 
 ## Build installers
