@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld("codexDesk", {
   getRateLimits: () => ipcRenderer.invoke("usage:get-rate-limits"),
   chooseFolder: () => ipcRenderer.invoke("dialog:choose-folder"),
   createSession: (input) => ipcRenderer.invoke("sessions:create", input),
+  setSessionTitle: (id, title) => ipcRenderer.invoke("sessions:set-title", id, title),
   closeSession: (id) => ipcRenderer.invoke("sessions:close", id),
   reopenSession: (id) => ipcRenderer.invoke("sessions:reopen", id),
   deleteSession: (id) => ipcRenderer.invoke("sessions:delete", id),

@@ -55,6 +55,7 @@ export interface CodexDeskApi {
   getRateLimits: () => Promise<CodexRateLimits>;
   chooseFolder: () => Promise<string | null>;
   createSession: (input: { cwd: string; cli: SessionCli }) => Promise<CimLineSession>;
+  setSessionTitle: (id: string, title: string) => Promise<boolean>;
   closeSession: (id: string) => Promise<CimLineSession>;
   reopenSession: (id: string) => Promise<CimLineSession>;
   deleteSession: (id: string) => Promise<boolean>;

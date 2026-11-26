@@ -1559,6 +1559,19 @@ function createSession(input) {
   return serializeSession(session);
 }
 
+function setSessionTitle(sessionId, title) {
+  const session = sessions.get(String(sessionId));
+  if (!session) throw new Error("セッションが見つかりません。");
+  if (!livePtys.has(session.id)) return false;
+  if (typeof title !== "string" || title.length > 300) throw new Error("セッション名が無効です。");
+  const normalizedTitle = title.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalizedTitle) return false;
+  if (normalizedTitle === session.title) return true;
+  session.title = normalizedTitle;
+  broadcastSessions();
+  return true;
+}
+
 async function closeSession(sessionId) {
   const session = sessions.get(String(sessionId));
   if (!session) throw new Error("セッションが見つかりません。");
@@ -1665,6 +1678,7 @@ function registerIpc() {
     return result.canceled ? null : result.filePaths[0] || null;
   });
   ipcMain.handle("sessions:create", (_event, input) => createSession(input || {}));
+  ipcMain.handle("sessions:set-title", (_event, id, title) => setSessionTitle(id, title));
   ipcMain.handle("sessions:close", (_event, id) => closeSession(id));
   ipcMain.handle("sessions:reopen", (_event, id) => reopenSession(id));
   ipcMain.handle("sessions:delete", (_event, id) => deleteSession(id));

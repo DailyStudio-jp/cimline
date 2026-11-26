@@ -4,6 +4,7 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { buildImagePastePayloads, flushQueuedImagePastePayloads, isSupportedImageName, MAX_DROPPED_IMAGES, pasteOrQueueImagePayloads, shouldClearImageDropOverlay } from "@/image-drop.mjs";
+import { getCliSessionTitle } from "@/session-title.mjs";
 import type { CimLineSession } from "@/vite-env";
 
 export type TerminalSession = CimLineSession;
@@ -12,6 +13,7 @@ type PtyBridge = {
   platform?: string;
   attachPty?: (id: string) => Promise<{ buffer: string; sequence: number }>;
   writePty?: (id: string, data: string) => Promise<unknown>;
+  setSessionTitle?: (id: string, title: string) => Promise<unknown>;
   resizePty?: (id: string, cols: number, rows: number) => Promise<unknown>;
   onPtyData?: (callback: (event: { sessionId: string; data: string; sequence: number }) => void) => () => void;
   onPtyExit?: (callback: (event: { sessionId: string; exitCode: number | null; signal: number | null }) => void) => () => void;
@@ -49,7 +51,11 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, 
   const terminalRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const pendingImagePastePayloadsRef = useRef<string[]>([]);
+  const latestSessionTitleRef = useRef(session.title);
+  const pendingSessionTitleRef = useRef<string | null>(null);
+  const sessionTitleTimerRef = useRef<number | null>(null);
   const [imageDropActive, setImageDropActive] = useState(false);
+  latestSessionTitleRef.current = session.title;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -118,6 +124,20 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, 
         return;
       }
       void bridge.writePty(session.id, data).catch((error) => onError("入力を送信できません: " + String(error)));
+    });
+    const titleDisposable = terminal.onTitleChange((rawTitle) => {
+      const updateSessionTitle = bridge.setSessionTitle;
+      if (typeof updateSessionTitle !== "function") return;
+      const title = getCliSessionTitle(rawTitle, { cli: session.cli, cwd: session.cwd });
+      if (!title || title === latestSessionTitleRef.current || title === pendingSessionTitleRef.current) return;
+      pendingSessionTitleRef.current = title;
+      if (sessionTitleTimerRef.current !== null) window.clearTimeout(sessionTitleTimerRef.current);
+      sessionTitleTimerRef.current = window.setTimeout(() => {
+        sessionTitleTimerRef.current = null;
+        pendingSessionTitleRef.current = null;
+        if (title === latestSessionTitleRef.current) return;
+        void updateSessionTitle(session.id, title).catch((error) => onError("セッション名を更新できません: " + String(error)));
+      }, 1800);
     });
     flushQueuedImagePastePayloads(pendingImagePastePayloadsRef.current, terminal);
     const resizeDisposable = terminal.onResize(({ cols, rows }) => {
@@ -214,6 +234,10 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, dragging, 
       unsubscribeData?.();
       unsubscribeExit?.();
       dataDisposable.dispose();
+      titleDisposable.dispose();
+      if (sessionTitleTimerRef.current !== null) window.clearTimeout(sessionTitleTimerRef.current);
+      sessionTitleTimerRef.current = null;
+      pendingSessionTitleRef.current = null;
       resizeDisposable.dispose();
       terminal.dispose();
       terminalRef.current = null;

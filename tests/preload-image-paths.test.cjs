@@ -6,11 +6,11 @@ const vm = require("node:vm");
 
 const preloadSource = fs.readFileSync(path.join(__dirname, "../electron/preload.cjs"), "utf8");
 
-function loadPreload(getPathForFile) {
+function loadPreload(getPathForFile, invoke = async () => {}) {
   let exposedApi;
   const electronMock = {
     contextBridge: { exposeInMainWorld: (_name, api) => { exposedApi = api; } },
-    ipcRenderer: { invoke: async () => {}, on: () => {}, removeListener: () => {} },
+    ipcRenderer: { invoke, on: () => {}, removeListener: () => {} },
     webUtils: { getPathForFile },
   };
   vm.runInNewContext(preloadSource, {
@@ -19,6 +19,13 @@ function loadPreload(getPathForFile) {
   }, { filename: "electron/preload.cjs" });
   return exposedApi;
 }
+
+test("preload sends session title updates through the dedicated IPC channel", async () => {
+  const calls = [];
+  const api = loadPreload((file) => file.path, async (...args) => calls.push(args));
+  await api.setSessionTitle("session-1", "Fix terminal session title");
+  assert.deepEqual(calls, [["sessions:set-title", "session-1", "Fix terminal session title"]]);
+});
 
 test("preload returns native paths for supported image extensions including Unicode names", () => {
   const api = loadPreload((file) => file.path);
