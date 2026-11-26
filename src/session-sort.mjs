@@ -1,4 +1,4 @@
-const SORT_MODES = new Set(["manual", "added-asc", "added-desc", "completed-asc", "completed-desc"]);
+const SORT_MODES = new Set(["manual", "added-asc", "added-desc", "updated-asc", "updated-desc"]);
 
 function getPosition(position, id) {
   return position.has(id) ? position.get(id) : Number.MAX_SAFE_INTEGER;
@@ -22,7 +22,7 @@ function compareCreatedAtDescending(left, right) {
   return (getTimestamp(right, "createdAt") ?? 0) - (getTimestamp(left, "createdAt") ?? 0);
 }
 
-/** Sort sessions by manual order, added time, or latest completion time. */
+/** Sort sessions by manual order, added time, or last status update time. */
 export function sortSessions(sessions, order, mode) {
   const safeMode = SORT_MODES.has(mode) ? mode : "added-desc";
   const position = new Map((Array.isArray(order) ? order : []).map((id, index) => [id, index]));
@@ -38,7 +38,7 @@ export function sortSessions(sessions, order, mode) {
 
     const [field, direction] = safeMode.startsWith("added-")
       ? ["createdAt", safeMode.endsWith("asc") ? "asc" : "desc"]
-      : ["completedAt", safeMode.endsWith("asc") ? "asc" : "desc"];
+      : ["statusAt", safeMode.endsWith("asc") ? "asc" : "desc"];
     const timestampOrder = compareTimestamp(getTimestamp(left, field), getTimestamp(right, field), direction);
     if (timestampOrder) return timestampOrder;
 

@@ -69,7 +69,6 @@ function serializeSession(session) {
     cli: session.cli,
     closed: session.closed === true,
     createdAt: session.createdAt,
-    completedAt: typeof session.completedAt === "string" ? session.completedAt : null,
     status: SESSION_STATUSES.has(session.status) ? session.status : session.closed ? "exited" : "idle",
     statusAt: typeof session.statusAt === "string" ? session.statusAt : null,
     unreviewed: session.unreviewed === true,
@@ -82,10 +81,6 @@ function normalizeSession(record) {
   const cli = record.cli === "claude" ? "claude" : record.cli === "codex" ? "codex" : null;
   if (!cli) return null;
   const cwd = path.resolve(record.cwd);
-  const storedStatusAt = typeof record.statusAt === "string" && !Number.isNaN(Date.parse(record.statusAt)) ? record.statusAt : null;
-  const storedCompletedAt = typeof record.completedAt === "string" && !Number.isNaN(Date.parse(record.completedAt))
-    ? record.completedAt
-    : record.status === "completed" ? storedStatusAt : null;
   return {
     id: record.id.slice(0, 160),
     title: typeof record.title === "string" && record.title.trim() ? record.title.slice(0, 300) : path.basename(cwd) || cwd,
@@ -93,7 +88,6 @@ function normalizeSession(record) {
     cli,
     closed: true,
     createdAt: typeof record.createdAt === "string" && !Number.isNaN(Date.parse(record.createdAt)) ? record.createdAt : new Date().toISOString(),
-    completedAt: storedCompletedAt,
     status: "exited",
     statusAt: new Date().toISOString(),
     unreviewed: false,
@@ -260,7 +254,6 @@ function setSessionStatus(session, status, { timestamp = new Date().toISOString(
   const wasUnreviewed = session.unreviewed === true;
   session.status = status;
   session.statusAt = timestamp;
-  if (status === "completed") session.completedAt = timestamp;
   if (status === "completed" || status === "approval") {
     session.unreviewed = focusedSessionId !== session.id || !isApplicationFocused();
     if (session.unreviewed && !wasUnreviewed && previousStatus !== status) notifyAttention(session, status);
@@ -1547,7 +1540,6 @@ function createSession(input) {
     cli,
     closed: true,
     createdAt: new Date().toISOString(),
-    completedAt: null,
     status: "idle",
     statusAt: new Date().toISOString(),
     unreviewed: false,

@@ -110,9 +110,6 @@ function normalizeSessions(value: unknown): TerminalSession[] {
       cli: item.cli,
       closed,
       createdAt: typeof item.createdAt === "string" ? item.createdAt : new Date(0).toISOString(),
-      completedAt: typeof item.completedAt === "string" && !Number.isNaN(Date.parse(item.completedAt))
-        ? item.completedAt
-        : item.status === "completed" && typeof item.statusAt === "string" && !Number.isNaN(Date.parse(item.statusAt)) ? item.statusAt : null,
       status: isSessionStatus(item.status) ? item.status : closed ? "exited" : "idle",
       statusAt: typeof item.statusAt === "string" && !Number.isNaN(Date.parse(item.statusAt)) ? item.statusAt : null,
       unreviewed: item.unreviewed === true,
@@ -149,8 +146,8 @@ export default function App() {
   const [recentFolders, setRecentFolders] = useState<RecentFolder[]>(loadRecentFolders);
   const [sessionOrder, setSessionOrder] = useState<string[]>(() => readJson<string[]>(sessionOrderStorageKey, []));
   const [sessionSortMode, setSessionSortMode] = useState<SessionSortMode>(() => {
-    const storedMode = readJson<unknown>(sessionSortStorageKey, "added-desc");
-    return isSessionSortMode(storedMode) ? storedMode : "added-desc";
+    const storedMode = readJson<unknown>(sessionSortStorageKey, "updated-asc");
+    return isSessionSortMode(storedMode) ? storedMode : "updated-asc";
   });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readJson<boolean>(sidebarCollapsedStorageKey, false));
   const [search, setSearch] = useState("");
@@ -578,8 +575,8 @@ export default function App() {
               >
                 <option value="added-asc">追加日時・古い順</option>
                 <option value="added-desc">追加日時・新しい順</option>
-                <option value="completed-asc">完了日時・古い順</option>
-                <option value="completed-desc">完了日時・新しい順</option>
+                <option value="updated-asc">状態更新日時・古い順</option>
+                <option value="updated-desc">状態更新日時・新しい順</option>
                 <option value="manual">手動（ドラッグ）</option>
               </select>
             </label>

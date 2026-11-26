@@ -10,7 +10,6 @@ export interface CimLineSession {
   cli: SessionCli;
   closed: boolean;
   createdAt: string;
-  completedAt: string | null;
   status: SessionStatus;
   statusAt: string | null;
   unreviewed: boolean;
