@@ -2,7 +2,7 @@
 
 Resolved package versions and license expressions recorded in `package-lock.json`. This inventory is generated from package metadata and does not verify the contents or correctness of each package license text.
 
-CimLine itself does not currently have a project license selected or a `LICENSE` file.
+CimLine itself is licensed under the MIT License; see `LICENSE`.
 
 | Package | Version | Declared license |
 | --- | --- | --- |

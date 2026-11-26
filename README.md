@@ -87,4 +87,4 @@ Codex CLI remains responsible for interactive `/` commands and `$` skill invocat
 
 ## Licenses
 
-CimLine does not currently have a project license selected or a `LICENSE` file. Resolved third-party dependency versions and the license expressions recorded in `package-lock.json` are listed in [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md). That inventory reflects package metadata and does not verify each package's license text.
+CimLine is licensed under the MIT License; see [`LICENSE`](./LICENSE). Resolved third-party dependency versions and the license expressions recorded in `package-lock.json` are listed in [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md). That inventory reflects package metadata and does not verify each package's license text.
