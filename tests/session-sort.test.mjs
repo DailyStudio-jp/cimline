@@ -19,8 +19,8 @@ test("updated sessions sort by status change time and move new activity to the c
   assert.deepEqual(sortSessions(sessions, [], "updated-desc").map(({ id }) => id), ["newer", "middle", "older", "not-yet-updated"]);
 });
 
-test("completed sort keeps completed and approval sessions before other statuses in either direction", () => {
-  assert.deepEqual(sortSessions(sessions, [], "completed-asc").map(({ id }) => id), ["middle", "newer", "not-yet-updated", "older"]);
+test("legacy completed sort modes follow update time without grouping statuses", () => {
+  assert.deepEqual(sortSessions(sessions, [], "completed-asc").map(({ id }) => id), ["not-yet-updated", "older", "middle", "newer"]);
   assert.deepEqual(sortSessions(sessions, [], "completed-desc").map(({ id }) => id), ["newer", "middle", "older", "not-yet-updated"]);
 });
 
@@ -49,11 +49,11 @@ test("submitting a prompt refreshes status time and moves the session to the las
   assert.deepEqual(sortSessions(updated, [], "updated-asc").map(({ id }) => id), ["not-yet-updated", "older", "newer", "middle"]);
 });
 
-test("submitting a prompt moves a completed-sort session to the end of the running group", () => {
+test("a newer status update sorts by time regardless of the session status", () => {
   const updated = sessions.map((session) => session.id === "newer"
     ? { ...session, status: "running", statusAt: "2026-01-05T00:00:00.000Z" }
     : session);
-  assert.deepEqual(sortSessions(updated, [], "completed-asc").map(({ id }) => id), ["middle", "not-yet-updated", "older", "newer"]);
+  assert.deepEqual(sortSessions(updated, [], "completed-asc").map(({ id }) => id), ["not-yet-updated", "older", "middle", "newer"]);
 });
 
 test("ties preserve the existing manual order", () => {

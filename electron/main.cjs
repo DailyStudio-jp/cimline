@@ -9,6 +9,9 @@ const { fileURLToPath } = require("node:url");
 const pty = require("node-pty");
 const { selectCodexRateLimits } = require("./rate-limits.cjs");
 
+const APP_USER_MODEL_ID = "local.codex.rundesk";
+if (process.platform === "win32") app.setAppUserModelId(APP_USER_MODEL_ID);
+
 const sessions = new Map();
 const livePtys = new Map();
 const SESSION_STORE_FILE = "sessions.json";
@@ -61,6 +64,7 @@ let focusedSessionId = null;
 let sessionSaveTimer = null;
 let sessionWriteChain = Promise.resolve();
 let sessionPersistenceReady = false;
+let restoreLegacySessionOrder = false;
 let quitFlushStarted = false;
 let quitFlushComplete = false;
 let codexStartupQueue = Promise.resolve();
@@ -172,6 +176,13 @@ function serializeSession(session) {
   };
 }
 
+function serializePersistedSession(session) {
+  return {
+    ...serializeSession(session),
+    restoreOnStartup: session.restoreOnStartup === true,
+  };
+}
+
 function normalizeSession(record) {
   if (!record || typeof record !== "object" || typeof record.id !== "string" || !record.id.trim()) return null;
   if (typeof record.cwd !== "string" || !record.cwd.trim() || !path.isAbsolute(record.cwd)) return null;
@@ -189,6 +200,7 @@ function normalizeSession(record) {
     cwd,
     cli,
     closed: true,
+    restoreOnStartup: record.restoreOnStartup === true || record.closed === false,
     createdAt: typeof record.createdAt === "string" && !Number.isNaN(Date.parse(record.createdAt)) ? record.createdAt : new Date().toISOString(),
     status: "exited",
     statusAt: new Date().toISOString(),
@@ -215,7 +227,11 @@ function scheduleSessionSave() {
 
 function queueSessionSave() {
   if (!sessionPersistenceReady || !sessionStorePath) return Promise.resolve();
-  const contents = JSON.stringify({ version: 1, sessions: [...sessions.values()].slice(-MAX_SESSIONS).map(serializeSession) }, null, 2);
+  const contents = JSON.stringify({
+    version: 2,
+    focusedSessionId,
+    sessions: [...sessions.values()].slice(-MAX_SESSIONS).map(serializePersistedSession),
+  }, null, 2);
   const write = async () => {
     await fs.promises.mkdir(path.dirname(sessionStorePath), { recursive: true });
     const temporaryPath = sessionStorePath + "." + process.pid + "." + Date.now() + "." + Math.random().toString(16).slice(2) + ".tmp";
@@ -261,6 +277,8 @@ function legacyTaskFiles() {
 function loadPersistedSessions() {
   sessionStorePath = path.join(app.getPath("userData"), SESSION_STORE_FILE);
   const stored = readJsonFile(sessionStorePath);
+  restoreLegacySessionOrder = Array.isArray(stored) || stored?.version === 1;
+  const savedFocusedSessionId = typeof stored?.focusedSessionId === "string" ? stored.focusedSessionId : null;
   const storedSessions = Array.isArray(stored?.sessions) ? stored.sessions : Array.isArray(stored) ? stored : null;
   if (storedSessions) {
     for (const record of storedSessions.slice(-MAX_SESSIONS)) {
@@ -290,9 +308,44 @@ function loadPersistedSessions() {
       if (sessions.size >= MAX_SESSIONS) break;
     }
   }
+  const restorableSessions = [...sessions.values()].filter((session) => session.restoreOnStartup);
+  if (restorableSessions.length > 0) {
+    focusedSessionId = restorableSessions.some((session) => session.id === savedFocusedSessionId)
+      ? savedFocusedSessionId
+      : [...restorableSessions].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0].id;
+  }
   sessionPersistenceReady = true;
   if (sessions.size > 0) scheduleSessionSave();
   updateUnreviewedBadge();
+}
+
+function restorePersistedSessions() {
+  const candidates = [...sessions.values()]
+    .filter((session) => session.restoreOnStartup)
+    .sort((left, right) => {
+      if (left.id === focusedSessionId) return -1;
+      if (right.id === focusedSessionId) return 1;
+      return Date.parse(right.createdAt) - Date.parse(left.createdAt);
+    });
+  const restoredSessionIds = new Set();
+  const restoredCliDirectories = new Set();
+  for (const session of candidates) {
+    const directory = path.normalize(session.cwd);
+    const restoreKey = `${session.cli}\u0000${process.platform === "win32" ? directory.toLowerCase() : directory}`;
+    if (restoredCliDirectories.has(restoreKey)) {
+      session.restoreOnStartup = false;
+      continue;
+    }
+    restoredCliDirectories.add(restoreKey);
+    try {
+      reopenSession(session.id);
+      if (livePtys.has(session.id)) restoredSessionIds.add(session.id);
+    } catch (error) {
+      console.warn(`前回のターミナルを再開できませんでした (${session.id}):`, error?.message || error);
+    }
+  }
+  if (!restoredSessionIds.has(focusedSessionId)) focusedSessionId = restoredSessionIds.values().next().value || null;
+  scheduleSessionSave();
 }
 
 function broadcastSessions() {
@@ -378,6 +431,7 @@ function focusSession(sessionId) {
     updateUnreviewedBadge();
     broadcastSessions();
   }
+  scheduleSessionSave();
   return true;
 }
 
@@ -1531,6 +1585,7 @@ function startPty(session, resume = false) {
   });
   livePtys.set(session.id, terminal);
   session.closed = false;
+  session.restoreOnStartup = false;
   session.status = "idle";
   session.statusAt = new Date().toISOString();
   session.unreviewed = false;
@@ -1690,7 +1745,9 @@ function setSessionAgentTitle(sessionId, title) {
 async function closeSession(sessionId) {
   const session = sessions.get(String(sessionId));
   if (!session) throw new Error("セッションが見つかりません。");
+  if (focusedSessionId === session.id) focusedSessionId = null;
   session.closed = true;
+  session.restoreOnStartup = false;
   session.inputLine = "";
   setSessionStatus(session, "exited", { broadcast: false });
   scheduleSessionSave();
@@ -1713,6 +1770,7 @@ function reopenSession(sessionId) {
     startPty(session, true);
   } catch (error) {
     session.closed = true;
+    session.restoreOnStartup = false;
     setSessionStatus(session, "exited", { broadcast: false });
     broadcastSessions();
     throw new Error("ターミナルを再開できませんでした: " + (error?.message || error));
@@ -1778,6 +1836,8 @@ function writeClipboardText(text) {
 function registerIpc() {
   ipcMain.handle("app:get-state", () => ({
     sessions: serializeSessions(),
+    focusedSessionId,
+    restoreLegacySessionOrder,
     cliAvailable: { codex: isCliAvailable("codex"), claude: isCliAvailable("claude") },
     defaultDirectory: process.env.CIMLINE_DEFAULT_PROJECT || process.env.CODEX_DEFAULT_PROJECT || (app.isPackaged ? app.getPath("documents") : process.cwd()),
     theme: themeSetting,
@@ -1876,6 +1936,7 @@ app.whenReady().then(async () => {
   loadPersistedSessions();
   try { await startNotifyServer(); }
   catch (error) { console.warn("状態通知サーバーを起動できませんでした:", error?.message || error); }
+  restorePersistedSessions();
   registerIpc();
   createWindow();
   app.on("activate", () => {
@@ -1888,15 +1949,18 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (quitFlushStarted) return;
   quitFlushStarted = true;
+  const restoreSessionIds = new Set(livePtys.keys());
   const stops = [...livePtys.values()].map((terminal) => stopPtyTree(terminal));
   livePtys.clear();
   for (const session of sessions.values()) {
+    session.restoreOnStartup = restoreSessionIds.has(session.id);
     session.closed = true;
     session.inputLine = "";
     session.status = "exited";
     session.statusAt = new Date().toISOString();
     session.unreviewed = false;
   }
+  if (!restoreSessionIds.has(focusedSessionId)) focusedSessionId = null;
   updateUnreviewedBadge();
   stopNotifyServer();
   Promise.allSettled(stops)

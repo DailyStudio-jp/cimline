@@ -2,6 +2,8 @@
 setlocal
 cd /d "%~dp0"
 
+if /i "%~1"=="--background" goto :background
+
 call :ensure_node
 if errorlevel 1 exit /b 1
 
@@ -11,12 +13,21 @@ if not exist "node_modules\.bin\vite.cmd" (
   if errorlevel 1 goto :failed
 )
 
-call npm run dev
+set "CIMLINE_STARTUP_OUT=%TEMP%\CimLine-startup.out.log"
+set "CIMLINE_STARTUP_ERR=%TEMP%\CimLine-startup.err.log"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-cimline-hidden.ps1" "%~f0" "%CD%" "%CIMLINE_STARTUP_OUT%" "%CIMLINE_STARTUP_ERR%"
 if errorlevel 1 goto :failed
+exit /b 0
+
+:background
+call npm run dev
+if errorlevel 1 exit /b 1
 exit /b 0
 
 :failed
 echo CimLine could not be started. Check the messages above.
+if exist "%CIMLINE_STARTUP_OUT%" type "%CIMLINE_STARTUP_OUT%"
+if exist "%CIMLINE_STARTUP_ERR%" type "%CIMLINE_STARTUP_ERR%"
 pause
 exit /b 1
 

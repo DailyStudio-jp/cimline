@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { Terminal as TerminalIcon, X } from "lucide-react";
+import { ArrowDown, Terminal as TerminalIcon, X } from "lucide-react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -110,6 +110,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
   const pendingSessionTitleRef = useRef<string | null>(null);
   const sessionTitleTimerRef = useRef<number | null>(null);
   const [imageDropActive, setImageDropActive] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const displayTitle = session.agentTitle || session.title;
   latestSessionTitleRef.current = session.agentTitle;
 
@@ -131,6 +132,9 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
     terminal.open(host);
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    const scrollDisposable = terminal.onScroll((viewportY) => {
+      setShowScrollToBottom(viewportY < terminal.buffer.active.baseY);
+    });
     let disposed = false;
     let attached = false;
     let lastSequence = -1;
@@ -283,6 +287,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
       sessionTitleTimerRef.current = null;
       pendingSessionTitleRef.current = null;
       resizeDisposable.dispose();
+      scrollDisposable.dispose();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
@@ -392,6 +397,19 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
       <div className="terminal-body">
         {imageDropActive && <div className="image-drop-overlay" aria-hidden="true">画像をドロップして添付</div>}
         <div ref={hostRef} className="xterm-host" />
+        {showScrollToBottom && <button
+          className="terminal-scroll-bottom"
+          type="button"
+          aria-label="最下部へ移動"
+          title="最下部へ移動"
+          onClick={() => {
+            const terminal = terminalRef.current;
+            if (!terminal) return;
+            terminal.scrollToBottom();
+            terminal.focus();
+            onFocus(session.id);
+          }}
+        ><ArrowDown size={15} aria-hidden="true" /></button>}
       </div>
     </article>
   );

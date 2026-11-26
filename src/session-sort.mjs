@@ -22,11 +22,7 @@ function compareCreatedAtDescending(left, right) {
   return (getTimestamp(right, "createdAt") ?? 0) - (getTimestamp(left, "createdAt") ?? 0);
 }
 
-function isCompletedSession(session) {
-  return session.status === "completed" || session.status === "approval";
-}
-
-/** Sort sessions by manual order, added time, update time, or completion time. */
+/** Sort sessions by manual order, added time, or status update time. */
 export function sortSessions(sessions, order, mode) {
   const safeMode = SORT_MODES.has(mode) ? mode : "added-desc";
   const position = new Map((Array.isArray(order) ? order : []).map((id, index) => [id, index]));
@@ -41,12 +37,6 @@ export function sortSessions(sessions, order, mode) {
     }
 
     const direction = safeMode.endsWith("asc") ? "asc" : "desc";
-    if (safeMode.startsWith("completed-")) {
-      const leftCompleted = isCompletedSession(left);
-      const rightCompleted = isCompletedSession(right);
-      if (leftCompleted !== rightCompleted) return leftCompleted ? -1 : 1;
-    }
-
     const field = safeMode.startsWith("added-") ? "createdAt" : "statusAt";
     const timestampOrder = compareTimestamp(getTimestamp(left, field), getTimestamp(right, field), direction);
     if (timestampOrder) return timestampOrder;

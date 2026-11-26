@@ -7,6 +7,7 @@ import {
   Code2,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Folder,
   FolderOpen,
   LoaderCircle,
@@ -28,11 +29,12 @@ import { Separator } from "@/components/ui/separator";
 type CliKind = "codex" | "claude";
 type RateWindow = { usedPercent: number; windowDurationMins: number | null; resetsAt: number | null };
 type RateLimits = { primary: RateWindow | null; secondary: RateWindow | null };
-type AppState = { sessions: TerminalSession[]; cliAvailable: { codex: boolean; claude: boolean }; defaultDirectory: string; theme: ThemeSetting; zoomFactor: number };
+type AppState = { sessions: TerminalSession[]; focusedSessionId?: string | null; restoreLegacySessionOrder?: boolean; cliAvailable: { codex: boolean; claude: boolean }; defaultDirectory: string; theme: ThemeSetting; zoomFactor: number };
 type CimLineBridge = {
   platform?: string;
   getState?: () => Promise<AppState>;
   chooseFolder?: () => Promise<string | null>;
+  writeClipboardText?: (text: string) => Promise<void>;
   createSession?: (input: { cwd: string; cli: CliKind }) => Promise<TerminalSession>;
   closeSession?: (id: string) => Promise<unknown>;
   reopenSession?: (id: string) => Promise<TerminalSession>;
@@ -173,10 +175,10 @@ export default function App() {
   const [recentFolders, setRecentFolders] = useState<RecentFolder[]>(loadRecentFolders);
   const [sessionOrder, setSessionOrder] = useState<string[]>(() => readJson<string[]>(sessionOrderStorageKey, []));
   const [sessionSortMode, setSessionSortMode] = useState<SessionSortMode>(() => {
-    const storedMode = readJson<unknown>(sessionSortStorageKey, "completed-asc");
-    if (storedMode === "updated-asc") return "completed-asc";
-    if (storedMode === "updated-desc") return "completed-desc";
-    return isSessionSortMode(storedMode) ? storedMode : "completed-asc";
+    const storedMode = readJson<unknown>(sessionSortStorageKey, "updated-asc");
+    if (storedMode === "completed-asc") return "updated-asc";
+    if (storedMode === "completed-desc") return "updated-desc";
+    return isSessionSortMode(storedMode) ? storedMode : "updated-asc";
   });
   const [terminalColumns, setTerminalColumns] = useState(loadTerminalColumns);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
@@ -185,6 +187,7 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [showUnreviewedOnly, setShowUnreviewedOnly] = useState(false);
   const [folderPath, setFolderPath] = useState("");
+  const [folderPathCopied, setFolderPathCopied] = useState(false);
   const [selectedCli, setSelectedCli] = useState<CliKind>(() => localStorage.getItem(lastCliStorageKey) === "claude" ? "claude" : "codex");
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
   const [reviewingSessionId, setReviewingSessionId] = useState<string | null>(null);
@@ -314,15 +317,44 @@ export default function App() {
     const unsubscribe = api.onSessionsUpdated?.((next) => {
       if (!disposed) setSessions(normalizeSessions(next));
     });
-    void api.getState().then((state) => {
+    void api.getState().then(async (state) => {
       if (disposed) return;
-      const nextSessions = normalizeSessions(state.sessions);
+      let nextSessions = normalizeSessions(state.sessions);
+      let startupFocusedSessionId = state.focusedSessionId;
+      if (state.restoreLegacySessionOrder === true && !nextSessions.some((session) => !session.closed) && sessionOrder.length > 0 && typeof api.reopenSession === "function") {
+        const restoreCandidates = sessionOrder
+          .map((id) => nextSessions.find((session) => session.id === id && session.closed))
+          .filter((session): session is TerminalSession => Boolean(session))
+          .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+        const restoredDirectories = new Set<string>();
+        const restoredSessions: TerminalSession[] = [];
+        for (const session of restoreCandidates) {
+          if (disposed) return;
+          const directory = bridge().platform === "win32" ? session.cwd.toLowerCase() : session.cwd;
+          const restoreKey = `${session.cli}\u0000${directory}`;
+          if (restoredDirectories.has(restoreKey)) continue;
+          restoredDirectories.add(restoreKey);
+          try {
+            restoredSessions.push(await api.reopenSession(session.id));
+          } catch {
+            // Older app versions did not mark which sessions were open at shutdown.
+          }
+        }
+        if (restoredSessions.length > 0) {
+          nextSessions = normalizeSessions([...nextSessions, ...restoredSessions]);
+          startupFocusedSessionId = restoredSessions[0].id;
+        }
+      }
       setSessions(nextSessions);
       setCliAvailable(state.cliAvailable || { codex: false, claude: false });
       setDefaultDirectory(state.defaultDirectory || "");
       setThemeSetting(state.theme === "light" || state.theme === "dark" ? state.theme : "system");
       setFolderPath((current) => current || state.defaultDirectory || recentFolders[0]?.path || "");
       setSessionsInitialized(true);
+      const focusedAtStartup = startupFocusedSessionId;
+      if (focusedAtStartup && nextSessions.some((session) => session.id === focusedAtStartup && !session.closed)) {
+        focusSession(focusedAtStartup);
+      }
       if (nextSessions.length === 0) setComposerOpen(true);
     }).catch((error) => {
       if (disposed) return;
@@ -577,9 +609,33 @@ export default function App() {
     }
     try {
       const selected = await api.chooseFolder();
-      if (selected) setFolderPath(selected);
+      if (selected) {
+        setFolderPath(selected);
+        setFolderPathCopied(false);
+      }
     } catch (error) {
       notify("フォルダーを選択できません: " + errorText(error), true);
+    }
+  }
+
+  async function copyFolderPath() {
+    const path = folderPath.trim();
+    if (!path) {
+      notify("コピーするフォルダーのパスがありません。", true);
+      return;
+    }
+    const api = bridge();
+    if (typeof api.writeClipboardText !== "function") {
+      notify("クリップボードAPIがありません。CimLineを完全終了して再起動してください。", true);
+      return;
+    }
+    try {
+      await api.writeClipboardText(path);
+      setFolderPathCopied(true);
+      notify("フォルダーのパスをコピーしました。");
+    } catch (error) {
+      setFolderPathCopied(false);
+      notify("パスをコピーできません: " + errorText(error), true);
     }
   }
 
@@ -834,8 +890,8 @@ export default function App() {
               >
                 <option value="added-asc">追加日時・古い順</option>
                 <option value="added-desc">追加日時・新しい順</option>
-                <option value="completed-asc">完了順・古い順</option>
-                <option value="completed-desc">完了順・新しい順</option>
+                <option value="updated-asc">更新日時・古い順</option>
+                <option value="updated-desc">更新日時・新しい順</option>
                 <option value="manual">手動（ドラッグ）</option>
               </select>
             </label>
@@ -920,7 +976,8 @@ export default function App() {
           <label className="field-label" htmlFor="new-session-folder">作業フォルダー</label>
           <div className="folder-field">
             <FolderOpen size={16} />
-            <input id="new-session-folder" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} placeholder={defaultDirectory || "フォルダーを選択"} spellCheck={false} required />
+            <input id="new-session-folder" value={folderPath} onChange={(event) => { setFolderPath(event.target.value); setFolderPathCopied(false); }} placeholder={defaultDirectory || "フォルダーを選択"} spellCheck={false} required />
+            <button type="button" className={"folder-copy-button" + (folderPathCopied ? " is-copied" : "")} aria-label={folderPathCopied ? "パスをコピーしました" : "パスをコピー"} title={folderPathCopied ? "コピー済み" : "パスをコピー"} disabled={!folderPath.trim()} onClick={() => void copyFolderPath()}>{folderPathCopied ? <Check size={14} /> : <Copy size={14} />}{folderPathCopied && <span>コピー済み</span>}</button>
             <button type="button" className="outline-button" onClick={() => void chooseFolder()}>選択</button>
           </div>
           <div className="field-label cli-picker-label">CLI</div>
@@ -946,7 +1003,7 @@ export default function App() {
 
       <dialog ref={usageRef} className="app-dialog usage-dialog" onCancel={(event) => { event.preventDefault(); setUsageOpen(false); }} onClose={() => setUsageOpen(false)} onClick={(event) => { if (event.target === event.currentTarget) setUsageOpen(false); }}>
         <div className="dialog-card">
-          <div className="dialog-heading"><div><div className="dialog-kicker">CODEX CLI</div><h2>使用量</h2><p>Codex CLIから5時間枠と週間枠を取得します。</p></div><div className="dialog-heading-actions"><button className="icon-button" type="button" aria-label="利用枠を更新" title="利用枠を更新" onClick={() => void refreshUsage()} disabled={rateLimitsLoading}><RefreshCw size={15} className={rateLimitsLoading ? "spin" : ""} /></button><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setUsageOpen(false)}><X size={17} /></button></div></div>
+          <div className="dialog-heading"><div><div className="dialog-kicker">CODEX CLI</div><h2>使用量</h2><p>Codex CLIの5時間枠・週間枠を表示します。Claude Codeは対象外です。</p></div><div className="dialog-heading-actions"><button className="icon-button" type="button" aria-label="利用枠を更新" title="利用枠を更新" onClick={() => void refreshUsage()} disabled={rateLimitsLoading}><RefreshCw size={15} className={rateLimitsLoading ? "spin" : ""} /></button><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setUsageOpen(false)}><X size={17} /></button></div></div>
           {rateLimitsLoading && !rateLimits ? <div className="dialog-state"><LoaderCircle size={16} className="spin" />利用枠を取得しています…</div> : rateWindows.length ? <div className="rate-window-list">{rateWindows.map((window, index) => {
             const used = Math.max(0, Math.min(100, window.usedPercent));
             const remaining = 100 - used;

@@ -21,6 +21,8 @@ export interface CimLineSession {
 
 export interface InitialState {
   sessions: CimLineSession[];
+  focusedSessionId?: string | null;
+  restoreLegacySessionOrder?: boolean;
   cliAvailable: Record<SessionCli, boolean>;
   defaultDirectory: string;
   theme: ThemeSetting;
