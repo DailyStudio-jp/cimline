@@ -26,10 +26,13 @@ function subscribe(channel, callback) {
 
 contextBridge.exposeInMainWorld("codexDesk", {
   getState: () => ipcRenderer.invoke("app:get-state"),
+  setTheme: (theme) => ipcRenderer.invoke("settings:set-theme", theme),
+  adjustZoom: (delta) => ipcRenderer.invoke("settings:adjust-zoom", delta),
   getRateLimits: () => ipcRenderer.invoke("usage:get-rate-limits"),
   chooseFolder: () => ipcRenderer.invoke("dialog:choose-folder"),
   createSession: (input) => ipcRenderer.invoke("sessions:create", input),
   setSessionTitle: (id, title) => ipcRenderer.invoke("sessions:set-title", id, title),
+  setAgentTitle: (id, title) => ipcRenderer.invoke("sessions:set-agent-title", id, title),
   closeSession: (id) => ipcRenderer.invoke("sessions:close", id),
   reopenSession: (id) => ipcRenderer.invoke("sessions:reopen", id),
   deleteSession: (id) => ipcRenderer.invoke("sessions:delete", id),

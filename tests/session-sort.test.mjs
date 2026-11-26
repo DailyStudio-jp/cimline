@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { moveSessionInOrder, sortSessions } from "../src/session-sort.mjs";
+import { moveSessionInOrder, preserveSessionOrder, sessionOrderDiffers, sortSessions } from "../src/session-sort.mjs";
 
 const sessions = [
-  { id: "older", createdAt: "2026-01-01T00:00:00.000Z", statusAt: "2026-01-01T02:00:00.000Z" },
-  { id: "newer", createdAt: "2026-01-03T00:00:00.000Z", statusAt: "2026-01-03T02:00:00.000Z" },
-  { id: "middle", createdAt: "2026-01-02T00:00:00.000Z", statusAt: "2026-01-02T02:00:00.000Z" },
-  { id: "not-yet-updated", createdAt: "2026-01-04T00:00:00.000Z", statusAt: null },
+  { id: "older", createdAt: "2026-01-01T00:00:00.000Z", statusAt: "2026-01-01T02:00:00.000Z", status: "running" },
+  { id: "newer", createdAt: "2026-01-03T00:00:00.000Z", statusAt: "2026-01-03T02:00:00.000Z", status: "completed" },
+  { id: "middle", createdAt: "2026-01-02T00:00:00.000Z", statusAt: "2026-01-02T02:00:00.000Z", status: "approval" },
+  { id: "not-yet-updated", createdAt: "2026-01-04T00:00:00.000Z", statusAt: null, status: "idle" },
 ];
 
 test("added sessions sort in both ascending and descending order", () => {
@@ -19,6 +19,11 @@ test("updated sessions sort by status change time and move new activity to the c
   assert.deepEqual(sortSessions(sessions, [], "updated-desc").map(({ id }) => id), ["newer", "middle", "older", "not-yet-updated"]);
 });
 
+test("completed sort keeps completed and approval sessions before other statuses in either direction", () => {
+  assert.deepEqual(sortSessions(sessions, [], "completed-asc").map(({ id }) => id), ["middle", "newer", "not-yet-updated", "older"]);
+  assert.deepEqual(sortSessions(sessions, [], "completed-desc").map(({ id }) => id), ["newer", "middle", "older", "not-yet-updated"]);
+});
+
 test("manual order remains available and places new entries by addition date", () => {
   assert.deepEqual(sortSessions(sessions, ["middle", "older"], "manual").map(({ id }) => id), ["middle", "older", "not-yet-updated", "newer"]);
 });
@@ -29,11 +34,26 @@ test("dragging in an automatic order can preserve the visible order as manual", 
   assert.equal(moveSessionInOrder(visibleOrder, "older", "missing"), null);
 });
 
+test("a held order stays stable while removed sessions disappear and new ones append", () => {
+  const sorted = [sessions[3], sessions[2], sessions[1]];
+  const held = preserveSessionOrder(sorted, ["older", "middle"]);
+  assert.deepEqual(held.map(({ id }) => id), ["middle", "not-yet-updated", "newer"]);
+  assert.equal(sessionOrderDiffers(sorted, held.map(({ id }) => id)), true);
+  assert.equal(sessionOrderDiffers(held, held.map(({ id }) => id)), false);
+});
+
 test("submitting a prompt refreshes status time and moves the session to the last position", () => {
   const updated = sessions.map((session) => session.id === "middle"
     ? { ...session, statusAt: "2026-01-05T00:00:00.000Z" }
     : session);
   assert.deepEqual(sortSessions(updated, [], "updated-asc").map(({ id }) => id), ["not-yet-updated", "older", "newer", "middle"]);
+});
+
+test("submitting a prompt moves a completed-sort session to the end of the running group", () => {
+  const updated = sessions.map((session) => session.id === "newer"
+    ? { ...session, status: "running", statusAt: "2026-01-05T00:00:00.000Z" }
+    : session);
+  assert.deepEqual(sortSessions(updated, [], "completed-asc").map(({ id }) => id), ["middle", "not-yet-updated", "older", "newer"]);
 });
 
 test("ties preserve the existing manual order", () => {

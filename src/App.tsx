@@ -13,6 +13,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings2,
   Sparkles,
   Terminal as TerminalIcon,
   Trash2,
@@ -20,15 +21,16 @@ import {
 } from "lucide-react";
 import { TerminalPane, type TerminalSession } from "@/components/TerminalPane";
 import { countReviewFilterResults, filterActiveSessions, isUnreviewedTerminal, nextReviewingSessionIdAfterReopen, retainReviewingSessionId } from "@/session-filter.mjs";
-import { isSessionSortMode, moveSessionInOrder, sortSessions, type SessionSortMode } from "@/session-sort.mjs";
-import type { SessionStatus } from "@/vite-env";
+import { isSessionSortMode, moveSessionInOrder, preserveSessionOrder, sessionOrderDiffers, sortSessions, type SessionSortMode } from "@/session-sort.mjs";
+import type { SessionStatus, ThemeSetting } from "@/vite-env";
 import { Separator } from "@/components/ui/separator";
 
 type CliKind = "codex" | "claude";
 type RateWindow = { usedPercent: number; windowDurationMins: number | null; resetsAt: number | null };
 type RateLimits = { primary: RateWindow | null; secondary: RateWindow | null };
-type AppState = { sessions: TerminalSession[]; cliAvailable: { codex: boolean; claude: boolean }; defaultDirectory: string };
+type AppState = { sessions: TerminalSession[]; cliAvailable: { codex: boolean; claude: boolean }; defaultDirectory: string; theme: ThemeSetting; zoomFactor: number };
 type CimLineBridge = {
+  platform?: string;
   getState?: () => Promise<AppState>;
   chooseFolder?: () => Promise<string | null>;
   createSession?: (input: { cwd: string; cli: CliKind }) => Promise<TerminalSession>;
@@ -38,13 +40,17 @@ type CimLineBridge = {
   onSessionsUpdated?: (callback: (sessions: TerminalSession[]) => void) => () => void;
   setFocusedSession?: (id: string | null) => Promise<unknown>;
   getRateLimits?: () => Promise<RateLimits>;
+  setTheme?: (theme: ThemeSetting) => Promise<ThemeSetting>;
+  adjustZoom?: (delta: number) => Promise<number>;
 };
 type RecentFolder = { path: string; name: string };
 const recentFolderStorageKey = "cimline-recent-folders";
 const sessionOrderStorageKey = "cimline-session-order";
 const sessionSortStorageKey = "cimline-session-sort";
+const terminalColumnsStorageKey = "cimline-terminal-columns";
 const lastCliStorageKey = "cimline-last-cli";
 const sidebarCollapsedStorageKey = "cimline-sidebar-collapsed";
+const SORT_INTERACTION_HOLD_MS = 4000;
 
 function bridge(): CimLineBridge {
   return (window.codexDesk || {}) as unknown as CimLineBridge;
@@ -60,8 +66,13 @@ function readJson<T>(key: string, fallback: T): T {
 }
 
 function folderName(value: string) {
+  if (/^[a-z]:[\\/]+$/i.test(value) || /^\/+$/u.test(value)) return value;
   const normalized = value.replace(/[\\/]+$/, "");
   return normalized.split(/[\\/]/).pop() || normalized || "フォルダー";
+}
+
+function sessionDisplayTitle(session: Pick<TerminalSession, "title" | "agentTitle" | "cwd">) {
+  return session.agentTitle || session.title || folderName(session.cwd);
 }
 
 function cliName(cli: CliKind) {
@@ -92,6 +103,17 @@ function loadRecentFolders() {
   return Array.isArray(value) ? value.filter((item) => item && typeof item.path === "string").slice(0, 8) : [];
 }
 
+function loadTerminalColumns() {
+  try {
+    const stored = localStorage.getItem(terminalColumnsStorageKey);
+    if (stored === null) return 2;
+    const value = Number(stored);
+    return Number.isInteger(value) ? Math.max(1, Math.min(6, value)) : 2;
+  } catch {
+    return 2;
+  }
+}
+
 function isSessionStatus(value: unknown): value is SessionStatus {
   return value === "idle" || value === "running" || value === "completed" || value === "approval" || value === "exited";
 }
@@ -105,7 +127,12 @@ function normalizeSessions(value: unknown): TerminalSession[] {
     const closed = item.closed === true;
     return [{
       id: item.id,
-      title: typeof item.title === "string" ? item.title : folderName(item.cwd),
+      title: folderName(item.cwd),
+      agentTitle: typeof item.agentTitle === "string"
+        ? item.agentTitle
+        : typeof item.title === "string" && item.title.toLocaleLowerCase() !== folderName(item.cwd).toLocaleLowerCase()
+          ? item.title
+          : "",
       cwd: item.cwd,
       cli: item.cli,
       closed,
@@ -146,9 +173,14 @@ export default function App() {
   const [recentFolders, setRecentFolders] = useState<RecentFolder[]>(loadRecentFolders);
   const [sessionOrder, setSessionOrder] = useState<string[]>(() => readJson<string[]>(sessionOrderStorageKey, []));
   const [sessionSortMode, setSessionSortMode] = useState<SessionSortMode>(() => {
-    const storedMode = readJson<unknown>(sessionSortStorageKey, "updated-asc");
-    return isSessionSortMode(storedMode) ? storedMode : "updated-asc";
+    const storedMode = readJson<unknown>(sessionSortStorageKey, "completed-asc");
+    if (storedMode === "updated-asc") return "completed-asc";
+    if (storedMode === "updated-desc") return "completed-desc";
+    return isSessionSortMode(storedMode) ? storedMode : "completed-asc";
   });
+  const [terminalColumns, setTerminalColumns] = useState(loadTerminalColumns);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const [heldSessionOrder, setHeldSessionOrder] = useState<string[] | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readJson<boolean>(sidebarCollapsedStorageKey, false));
   const [search, setSearch] = useState("");
   const [showUnreviewedOnly, setShowUnreviewedOnly] = useState(false);
@@ -159,6 +191,8 @@ export default function App() {
   const [statusClock, setStatusClock] = useState(() => Date.now());
   const [composerOpen, setComposerOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [themeSetting, setThemeSetting] = useState<ThemeSetting>("system");
   const [rateLimits, setRateLimits] = useState<RateLimits | null>(null);
   const [rateLimitsLoading, setRateLimitsLoading] = useState(false);
   const [rateLimitsError, setRateLimitsError] = useState("");
@@ -170,10 +204,16 @@ export default function App() {
   const [dropTargetSessionId, setDropTargetSessionId] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const terminalGridRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<HTMLElement>(null);
+  const displayedOrderRef = useRef<string[]>([]);
+  const heldSessionOrderRef = useRef<string[] | null>(null);
+  const sortHoldUntilRef = useRef(0);
+  const sortHoldTimerRef = useRef<number | null>(null);
   const previousTerminalPositionsRef = useRef(new Map<string, { left: number; top: number }>());
   const terminalMoveAnimationsRef = useRef(new Map<string, Animation>());
   const composerRef = useRef<HTMLDialogElement>(null);
   const usageRef = useRef<HTMLDialogElement>(null);
+  const settingsRef = useRef<HTMLDialogElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusedSessionIdRef = useRef<string | null>(null);
   const reviewingSessionIdRef = useRef<string | null>(null);
@@ -191,6 +231,37 @@ export default function App() {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 3500);
   }, []);
+
+  const clearDeferredSort = useCallback(() => {
+    if (sortHoldTimerRef.current !== null) window.clearTimeout(sortHoldTimerRef.current);
+    sortHoldTimerRef.current = null;
+    sortHoldUntilRef.current = 0;
+    heldSessionOrderRef.current = null;
+    setHeldSessionOrder(null);
+  }, []);
+
+  const deferSortAfterInteraction = useCallback(() => {
+    if (sessionSortMode === "manual") return;
+    if (!heldSessionOrderRef.current) {
+      const currentOrder = [...displayedOrderRef.current];
+      heldSessionOrderRef.current = currentOrder;
+      setHeldSessionOrder(currentOrder);
+    }
+    sortHoldUntilRef.current = Date.now() + SORT_INTERACTION_HOLD_MS;
+    if (sortHoldTimerRef.current !== null) window.clearTimeout(sortHoldTimerRef.current);
+    const releaseWhenQuiet = () => {
+      const remaining = sortHoldUntilRef.current - Date.now();
+      if (remaining > 0) {
+        sortHoldTimerRef.current = window.setTimeout(releaseWhenQuiet, remaining);
+        return;
+      }
+      sortHoldTimerRef.current = null;
+      sortHoldUntilRef.current = 0;
+      heldSessionOrderRef.current = null;
+      setHeldSessionOrder(null);
+    };
+    sortHoldTimerRef.current = window.setTimeout(releaseWhenQuiet, SORT_INTERACTION_HOLD_MS);
+  }, [sessionSortMode]);
 
   const focusSession = useCallback((sessionId: string) => {
     focusedSessionIdRef.current = sessionId;
@@ -249,6 +320,7 @@ export default function App() {
       setSessions(nextSessions);
       setCliAvailable(state.cliAvailable || { codex: false, claude: false });
       setDefaultDirectory(state.defaultDirectory || "");
+      setThemeSetting(state.theme === "light" || state.theme === "dark" ? state.theme : "system");
       setFolderPath((current) => current || state.defaultDirectory || recentFolders[0]?.path || "");
       setSessionsInitialized(true);
       if (nextSessions.length === 0) setComposerOpen(true);
@@ -279,6 +351,56 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const updateWidth = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", updateWidth);
+    return () => window.removeEventListener("resize", updateWidth);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(terminalColumnsStorageKey, String(terminalColumns));
+  }, [terminalColumns]);
+
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const onKeyDown = () => deferSortAfterInteraction();
+    const onPointerDown = () => deferSortAfterInteraction();
+    const onScroll = () => deferSortAfterInteraction();
+    const onWheel = (event: WheelEvent) => {
+      if (event.altKey) {
+        deferSortAfterInteraction();
+        event.preventDefault();
+        event.stopPropagation();
+        workspace.scrollBy({ top: event.deltaY || event.deltaX, behavior: "auto" });
+        return;
+      }
+      const isMac = bridge().platform === "darwin";
+      if (event.ctrlKey || (isMac && event.metaKey)) {
+        deferSortAfterInteraction();
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.deltaY !== 0) setTerminalColumns((current) => Math.max(1, Math.min(6, current + (event.deltaY < 0 ? 1 : -1))));
+        return;
+      }
+      deferSortAfterInteraction();
+    };
+    workspace.addEventListener("keydown", onKeyDown, true);
+    workspace.addEventListener("pointerdown", onPointerDown, true);
+    workspace.addEventListener("scroll", onScroll, true);
+    workspace.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    return () => {
+      workspace.removeEventListener("keydown", onKeyDown, true);
+      workspace.removeEventListener("pointerdown", onPointerDown, true);
+      workspace.removeEventListener("scroll", onScroll, true);
+      workspace.removeEventListener("wheel", onWheel, true);
+    };
+  }, [deferSortAfterInteraction]);
+
+  useEffect(() => () => {
+    if (sortHoldTimerRef.current !== null) window.clearTimeout(sortHoldTimerRef.current);
+  }, []);
+
+  useEffect(() => {
     const dialog = composerRef.current;
     if (!dialog) return;
     if (composerOpen && !dialog.open) {
@@ -293,6 +415,33 @@ export default function App() {
     if (usageOpen && !dialog.open) dialog.showModal();
     else if (!usageOpen && dialog.open) dialog.close();
   }, [usageOpen]);
+
+  useEffect(() => {
+    const dialog = settingsRef.current;
+    if (!dialog) return;
+    if (settingsOpen && !dialog.open) dialog.showModal();
+    else if (!settingsOpen && dialog.open) dialog.close();
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    const handleZoomShortcut = (event: KeyboardEvent) => {
+      const isMac = bridge().platform === "darwin";
+      if (!(isMac ? event.metaKey : event.ctrlKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      const delta = key === "0" ? 0
+        : key === "+" || key === "=" || event.code === "NumpadAdd" ? 0.1
+        : key === "-" || key === "_" || event.code === "NumpadSubtract" ? -0.1
+        : null;
+      if (delta === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const api = bridge();
+      if (typeof api.adjustZoom !== "function") return;
+      void api.adjustZoom(delta).catch((error) => notify("表示倍率を変更できません: " + errorText(error), true));
+    };
+    window.addEventListener("keydown", handleZoomShortcut, true);
+    return () => window.removeEventListener("keydown", handleZoomShortcut, true);
+  }, [notify]);
 
   useEffect(() => {
     if (!sessionsInitialized) return;
@@ -313,15 +462,25 @@ export default function App() {
     const active = sessions.filter((session) => !session.closed);
     return sortSessions(active, sessionOrder, sessionSortMode);
   }, [sessions, sessionOrder, sessionSortMode]);
+  const displayedSortedActiveSessions = useMemo(
+    () => preserveSessionOrder(sortedActiveSessions, heldSessionOrder),
+    [sortedActiveSessions, heldSessionOrder],
+  );
+  const displayedOrder = displayedSortedActiveSessions.map((session) => session.id);
+  displayedOrderRef.current = displayedOrder;
+  const sortUpdatePending = heldSessionOrder !== null && sessionOrderDiffers(sortedActiveSessions, displayedOrder);
+  const sidebarWidth = sidebarCollapsed ? 58 : 212;
+  const maxVisibleColumns = Math.max(1, Math.min(6, Math.floor(Math.max(320, viewportWidth - sidebarWidth - 32) / 320)));
+  const visibleColumns = Math.min(terminalColumns, maxVisibleColumns);
 
   const query = search.trim().toLowerCase();
   const filterOptions = { query, showUnreviewedOnly, reviewingSessionId };
-  const reviewFilterCount = countReviewFilterResults(sortedActiveSessions, filterOptions);
-  const filteredActiveSessions = filterActiveSessions(sortedActiveSessions, filterOptions);
+  const reviewFilterCount = countReviewFilterResults(displayedSortedActiveSessions, filterOptions);
+  const filteredActiveSessions = filterActiveSessions(displayedSortedActiveSessions, filterOptions);
   const visibleSessionOrder = filteredActiveSessions.map((session) => session.id).join("\u0000");
   const historySessions = useMemo(() => sessions
     .filter((session) => session.closed)
-    .filter((session) => !query || [session.title, session.cwd, cliName(session.cli)].some((value) => value.toLowerCase().includes(query)))
+    .filter((session) => !query || [sessionDisplayTitle(session), session.title, session.cwd, cliName(session.cli)].some((value) => value.toLowerCase().includes(query)))
     .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()), [sessions, query]);
   const rateWindows = useMemo(() => rateLimits
     ? [rateLimits.primary, rateLimits.secondary].filter((item): item is RateWindow => Boolean(item))
@@ -482,7 +641,7 @@ export default function App() {
   async function deleteSession(sessionId: string) {
     const session = sessions.find((item) => item.id === sessionId);
     if (!session) return;
-    if (!window.confirm("履歴から「" + session.title + "」を削除しますか？")) return;
+    if (!window.confirm("履歴から「" + sessionDisplayTitle(session) + "」を削除しますか？")) return;
     const api = bridge();
     if (typeof api.deleteSession !== "function") {
       notify("履歴削除APIがありません。CimLineを完全終了して再起動してください。", true);
@@ -519,7 +678,7 @@ export default function App() {
       setDropTargetSessionId(null);
       return;
     }
-    const next = moveSessionInOrder(sortedActiveSessions.map((session) => session.id), sourceId, sessionId);
+    const next = moveSessionInOrder(displayedSortedActiveSessions.map((session) => session.id), sourceId, sessionId);
     if (!next) {
       setDraggingSessionId(null);
       setDropTargetSessionId(null);
@@ -531,13 +690,28 @@ export default function App() {
       setSessionSortMode("manual");
       localStorage.setItem(sessionSortStorageKey, "manual");
     }
+    clearDeferredSort();
     setDraggingSessionId(null);
     setDropTargetSessionId(null);
-  }, [draggingSessionId, sortedActiveSessions, sessionSortMode]);
+  }, [clearDeferredSort, draggingSessionId, displayedSortedActiveSessions, sessionSortMode]);
 
   function showUsage() {
     setUsageOpen(true);
     void refreshUsage();
+  }
+
+  async function chooseTheme(theme: ThemeSetting) {
+    const api = bridge();
+    if (typeof api.setTheme !== "function") {
+      notify("テーマ設定APIがありません。CimLineを完全終了して再起動してください。", true);
+      return;
+    }
+    try {
+      const savedTheme = await api.setTheme(theme);
+      setThemeSetting(savedTheme);
+    } catch (error) {
+      notify("テーマを保存できません: " + errorText(error), true);
+    }
   }
 
   function toggleSidebar() {
@@ -581,7 +755,7 @@ export default function App() {
                   <button type="button" className="history-open" onClick={() => void reopenSession(session.id)} disabled={workingSessionId === session.id} title={session.cwd}>
                     <span className={"history-cli-dot is-" + session.cli} />
                     <span className="history-copy">
-                      <strong>{session.title || folderName(session.cwd)}</strong>
+                      <strong>{sessionDisplayTitle(session)}</strong>
                       <small>{cliName(session.cli)} · {session.cwd}</small>
                       <span className={"history-status is-" + session.status} title={sessionStatusLabel(session.status) + (statusAgeLabel(session.statusAt, statusClock) ? " " + statusAgeLabel(session.statusAt, statusClock) : "")}>
                         {sessionStatusLabel(session.status)}{statusAgeLabel(session.statusAt, statusClock) && <span className="history-status-age">{statusAgeLabel(session.statusAt, statusClock)}</span>}
@@ -589,7 +763,7 @@ export default function App() {
                     </span>
                     {workingSessionId === session.id ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />}
                   </button>
-                  <button type="button" className="history-delete" aria-label={session.title + " の履歴を削除"} title="履歴を削除" onClick={() => void deleteSession(session.id)}><Trash2 size={13} /></button>
+                  <button type="button" className="history-delete" aria-label={sessionDisplayTitle(session) + " の履歴を削除"} title="履歴を削除" onClick={() => void deleteSession(session.id)}><Trash2 size={13} /></button>
                 </article>
               )) : <div className="sidebar-empty">{sessionsInitialized ? "閉じたターミナルはありません。" : "履歴を読み込んでいます…"}</div>}
             </div>
@@ -625,26 +799,33 @@ export default function App() {
                 onChange={(event) => {
                   const mode = event.currentTarget.value;
                   if (!isSessionSortMode(mode)) return;
+                  clearDeferredSort();
                   setSessionSortMode(mode);
                   localStorage.setItem(sessionSortStorageKey, mode);
                 }}
               >
                 <option value="added-asc">追加日時・古い順</option>
                 <option value="added-desc">追加日時・新しい順</option>
-                <option value="updated-asc">状態更新日時・古い順</option>
-                <option value="updated-desc">状態更新日時・新しい順</option>
+                <option value="completed-asc">完了順・古い順</option>
+                <option value="completed-desc">完了順・新しい順</option>
                 <option value="manual">手動（ドラッグ）</option>
               </select>
             </label>
+            {sortUpdatePending && <button className="sort-pending" type="button" onClick={clearDeferredSort} title="保留中の並び替えをすぐに適用">並び替えを適用</button>}
           </div>
           <div className="topbar-right">
+            <button className="settings-trigger" type="button" aria-label="設定" title="設定" onClick={() => setSettingsOpen(true)}><Settings2 size={15} /><span>設定</span></button>
             <span className="connection-badge"><span className="connection-dot" />ローカル接続</span>
           </div>
         </header>
         {bridgeError && <div className="bridge-error"><AlertCircle size={15} /><span>{bridgeError}</span></div>}
-        <main className="workspace">
+        <main className="workspace" ref={workspaceRef}>
           {filteredActiveSessions.length ? (
-            <div className="terminal-grid" ref={terminalGridRef}>
+            <div
+              className={"terminal-grid" + (visibleColumns === 2 ? " has-two-columns" : "")}
+              ref={terminalGridRef}
+              style={{ gridTemplateColumns: `repeat(${visibleColumns}, minmax(0, 1fr))` }}
+            >
               {filteredActiveSessions.map((session) => (
                 <TerminalPane
                   key={session.id}
@@ -681,6 +862,25 @@ export default function App() {
           )}
         </main>
       </div>
+
+      <dialog ref={settingsRef} className="app-dialog settings-dialog" onCancel={(event) => { event.preventDefault(); setSettingsOpen(false); }} onClose={() => setSettingsOpen(false)} onClick={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
+        <div className="dialog-card">
+          <div className="dialog-heading"><div><div className="dialog-kicker">CIMLINE</div><h2>設定</h2><p>表示テーマを選べます。拡大率は Ctrl / Cmd + / − で調整、0 でリセットできます。</p></div><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setSettingsOpen(false)}><X size={17} /></button></div>
+          <fieldset className="settings-group">
+            <legend>テーマ</legend>
+            {([
+              ["system", "システムに合わせる", "WindowsまたはmacOSの外観設定を使います。"],
+              ["light", "ライト", "明るい配色を使います。"],
+              ["dark", "ダーク", "暗い配色を使います。"],
+            ] as const).map(([value, label, description]) => (
+              <label className={"settings-option" + (themeSetting === value ? " selected" : "")} key={value}>
+                <input type="radio" name="theme" value={value} checked={themeSetting === value} onChange={() => void chooseTheme(value)} />
+                <span><strong>{label}</strong><small>{description}</small></span>
+              </label>
+            ))}
+          </fieldset>
+        </div>
+      </dialog>
 
       <dialog ref={composerRef} className="app-dialog new-session-dialog" onCancel={(event) => { event.preventDefault(); setComposerOpen(false); }} onClose={() => setComposerOpen(false)} onClick={(event) => { if (event.target === event.currentTarget) setComposerOpen(false); }}>
         <form className="dialog-card" onSubmit={createSession}>

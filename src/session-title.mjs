@@ -1,6 +1,23 @@
 const CODEX_SPINNER = /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*/u;
 const CLAUDE_ACTIVITY_GLYPH = /^[◐◑✳✢✽✻✶✷✦]\uFE0F?\s*/u;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+const GENERIC_TITLES = new Set([
+  "codex",
+  "codex cli",
+  "claude",
+  "claude code",
+  "powershell",
+  "powershell.exe",
+  "windows powershell",
+  "pwsh",
+  "pwsh.exe",
+  "cmd",
+  "cmd.exe",
+  "command prompt",
+  "terminal",
+  "zsh",
+  "bash",
+]);
 
 function cleanTitle(value) {
   return String(value ?? "")
@@ -16,20 +33,10 @@ function folderName(cwd) {
 }
 
 function isGenericTitle(title, cli) {
-  const normalized = title.toLocaleLowerCase();
-  const genericTitles = new Set([
-    "codex",
-    "codex cli",
-    "claude",
-    "claude code",
-    "powershell",
-    "windows powershell",
-    "pwsh",
-    "cmd",
-    "command prompt",
-    "terminal",
-  ]);
-  return genericTitles.has(normalized) || normalized === cli;
+  const normalized = title.toLocaleLowerCase().replace(/\\/g, "/");
+  const executableName = normalized.slice(normalized.lastIndexOf("/") + 1);
+  const shellPromptTitle = /^(?:ps\s+)?[a-z]:\/|^~(?:\/|$)|^[^\s@]+@[^:\s]+:\s*~?(?:\/|$)/i.test(normalized);
+  return shellPromptTitle || GENERIC_TITLES.has(normalized) || GENERIC_TITLES.has(executableName) || normalized === cli;
 }
 
 /**

@@ -29,6 +29,33 @@ test("generic CLI and shell titles do not replace the folder fallback", () => {
   assert.equal(getCliSessionTitle("⠋ parent-project", { cli: "codex", cwd: "F:\\work\\parent-project\\app" }), null);
 });
 
+test("Windows shell executable paths do not replace folder fallback for Claude or Codex", () => {
+  const shellTitles = [
+    String.raw`C:\Program Files\PowerShell\7\pwsh.exe`,
+    String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+    "pwsh.exe",
+    "powershell.exe",
+  ];
+  for (const shellTitle of shellTitles) {
+    assert.equal(getCliSessionTitle(shellTitle, { cli: "claude", cwd: "C:\\work\\cimline" }), null);
+    assert.equal(getCliSessionTitle(shellTitle + " | cimline", { cli: "codex", cwd: "C:\\work\\cimline" }), null);
+  }
+});
+
+test("macOS shell executable titles do not replace folder fallback for Claude or Codex", () => {
+  const shellTitles = ["/bin/zsh", "/bin/bash", "zsh", "bash"];
+  for (const shellTitle of shellTitles) {
+    assert.equal(getCliSessionTitle(shellTitle, { cli: "claude", cwd: "/Users/test/cimline" }), null);
+    assert.equal(getCliSessionTitle(shellTitle + " | cimline", { cli: "codex", cwd: "/Users/test/cimline" }), null);
+  }
+});
+
+test("shell prompt and path titles do not become Claude session names", () => {
+  for (const shellTitle of ["PS C:\\work\\cimline", "C:\\work\\cimline", "~/work/cimline", "user@MacBook: ~/work/cimline"]) {
+    assert.equal(getCliSessionTitle(shellTitle, { cli: "claude", cwd: "/Users/test/cimline" }), null);
+  }
+});
+
 test("invalid CLI types and empty titles are ignored", () => {
   assert.equal(getCliSessionTitle("A title", { cli: "shell" }), null);
   assert.equal(getCliSessionTitle(" \n ", { cli: "claude" }), null);

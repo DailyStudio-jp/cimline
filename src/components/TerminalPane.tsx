@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { buildImagePastePayloads, flushQueuedImagePastePayloads, isSupportedImageName, MAX_DROPPED_IMAGES, pasteOrQueueImagePayloads, shouldClearImageDropOverlay } from "@/image-drop.mjs";
 import { getCliSessionTitle } from "@/session-title.mjs";
+import { ScrollbackClearFilter } from "@/terminal-output.mjs";
 import type { CimLineSession } from "@/vite-env";
 
 export type TerminalSession = CimLineSession;
@@ -13,6 +14,7 @@ type PtyBridge = {
   platform?: string;
   attachPty?: (id: string) => Promise<{ buffer: string; sequence: number }>;
   writePty?: (id: string, data: string) => Promise<unknown>;
+  setAgentTitle?: (id: string, title: string) => Promise<unknown>;
   setSessionTitle?: (id: string, title: string) => Promise<unknown>;
   resizePty?: (id: string, cols: number, rows: number) => Promise<unknown>;
   onPtyData?: (callback: (event: { sessionId: string; data: string; sequence: number }) => void) => () => void;
@@ -47,16 +49,69 @@ function hasFileItems(event: ReactDragEvent<HTMLElement>) {
     || Array.from(event.dataTransfer.types).includes("Files");
 }
 
+const DARK_TERMINAL_THEME = {
+  background: "#10110f",
+  foreground: "#e5e8df",
+  cursor: "#c8f36c",
+  cursorAccent: "#10110f",
+  selectionBackground: "#556a3980",
+  black: "#171914",
+  red: "#ee8e80",
+  green: "#b9df72",
+  yellow: "#e7c86f",
+  blue: "#91b9e0",
+  magenta: "#d3a8db",
+  cyan: "#92d7d0",
+  white: "#e4e8dc",
+  brightBlack: "#7b8073",
+  brightRed: "#ffaca0",
+  brightGreen: "#d4fa8c",
+  brightYellow: "#ffe39a",
+  brightBlue: "#b5d5f6",
+  brightMagenta: "#e6b9ed",
+  brightCyan: "#b0efea",
+  brightWhite: "#ffffff",
+};
+
+const LIGHT_TERMINAL_THEME = {
+  background: "#f6f7f3",
+  foreground: "#24261f",
+  cursor: "#526b21",
+  cursorAccent: "#f6f7f3",
+  selectionBackground: "#b8d98480",
+  black: "#20221c",
+  red: "#9f382c",
+  green: "#4f6e1e",
+  yellow: "#75520b",
+  blue: "#2f5c83",
+  magenta: "#74477b",
+  cyan: "#28645e",
+  white: "#e3e6de",
+  brightBlack: "#6e7268",
+  brightRed: "#79291f",
+  brightGreen: "#3d5816",
+  brightYellow: "#614306",
+  brightBlue: "#244b70",
+  brightMagenta: "#60376a",
+  brightCyan: "#1d504b",
+  brightWhite: "#ffffff",
+};
+
+function terminalThemeForSystem(): typeof DARK_TERMINAL_THEME {
+  return window.matchMedia("(prefers-color-scheme: light)").matches ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME;
+}
+
 function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderable, dragging, dropTarget, onClose, onFocus, onDragStart, onDragOver, onDrop, onError }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const pendingImagePastePayloadsRef = useRef<string[]>([]);
-  const latestSessionTitleRef = useRef(session.title);
+  const latestSessionTitleRef = useRef(session.agentTitle);
   const pendingSessionTitleRef = useRef<string | null>(null);
   const sessionTitleTimerRef = useRef<number | null>(null);
   const [imageDropActive, setImageDropActive] = useState(false);
-  latestSessionTitleRef.current = session.title;
+  const displayTitle = session.agentTitle || session.title;
+  latestSessionTitleRef.current = session.agentTitle;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -69,29 +124,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
       fontSize: 14,
       lineHeight: 1.25,
       scrollback: 10000,
-      theme: {
-        background: "#10110f",
-        foreground: "#e5e8df",
-        cursor: "#c8f36c",
-        cursorAccent: "#10110f",
-        selectionBackground: "#556a3980",
-        black: "#171914",
-        red: "#ee8e80",
-        green: "#b9df72",
-        yellow: "#e7c86f",
-        blue: "#91b9e0",
-        magenta: "#d3a8db",
-        cyan: "#92d7d0",
-        white: "#e4e8dc",
-        brightBlack: "#7b8073",
-        brightRed: "#ffaca0",
-        brightGreen: "#d4fa8c",
-        brightYellow: "#ffe39a",
-        brightBlue: "#b5d5f6",
-        brightMagenta: "#e6b9ed",
-        brightCyan: "#b0efea",
-        brightWhite: "#ffffff",
-      },
+      theme: terminalThemeForSystem(),
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
@@ -101,11 +134,17 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
     let disposed = false;
     let attached = false;
     let lastSequence = -1;
+    const scrollbackFilter = new ScrollbackClearFilter();
+    const colorScheme = window.matchMedia("(prefers-color-scheme: light)");
+    const updateTerminalTheme = () => {
+      terminal.options.theme = colorScheme.matches ? LIGHT_TERMINAL_THEME : DARK_TERMINAL_THEME;
+    };
+    colorScheme.addEventListener("change", updateTerminalTheme);
     const queuedEvents: Array<{ data: string; sequence: number }> = [];
 
     const writeEvent = (event: { data: string; sequence: number }) => {
       if (!Number.isFinite(event.sequence) || event.sequence <= lastSequence) return;
-      terminal.write(event.data);
+      terminal.write(scrollbackFilter.push(event.data));
       lastSequence = event.sequence;
     };
     const unsubscribeData = bridge.onPtyData?.((event) => {
@@ -115,6 +154,8 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
     });
     const unsubscribeExit = bridge.onPtyExit?.((event) => {
       if (event.sessionId !== session.id) return;
+      const trailingOutput = scrollbackFilter.flush();
+      if (trailingOutput) terminal.write(trailingOutput);
       if (!disposed && event.exitCode !== null && event.exitCode !== 0) {
         onError("ターミナルプロセスが終了しました (exit " + event.exitCode + ")");
       }
@@ -127,7 +168,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
       void bridge.writePty(session.id, data).catch((error) => onError("入力を送信できません: " + String(error)));
     });
     const titleDisposable = terminal.onTitleChange((rawTitle) => {
-      const updateSessionTitle = bridge.setSessionTitle;
+      const updateSessionTitle = bridge.setAgentTitle || bridge.setSessionTitle;
       if (typeof updateSessionTitle !== "function") return;
       const title = getCliSessionTitle(rawTitle, { cli: session.cli, cwd: session.cwd });
       if (!title || title === latestSessionTitleRef.current || title === pendingSessionTitleRef.current) return;
@@ -208,7 +249,8 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
       void bridge.attachPty(session.id).then((snapshot) => {
         if (disposed) return;
         terminal.reset();
-        terminal.write(snapshot.buffer || "");
+        scrollbackFilter.reset();
+        terminal.write(scrollbackFilter.push(snapshot.buffer || ""));
         lastSequence = Number.isFinite(snapshot.sequence) ? snapshot.sequence : -1;
         attached = true;
         queuedEvents.sort((left, right) => left.sequence - right.sequence).forEach(writeEvent);
@@ -232,6 +274,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
     return () => {
       disposed = true;
       resizeObserver.disconnect();
+      colorScheme.removeEventListener("change", updateTerminalTheme);
       unsubscribeData?.();
       unsubscribeExit?.();
       dataDisposable.dispose();
@@ -295,7 +338,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
     <article
       data-session-id={session.id}
       className={"terminal-pane" + (reorderable ? " is-reorderable" : "") + (dragging ? " is-dragging" : "") + (dropTarget ? " is-drop-target" : "") + (focused ? " is-focused" : "") + (unreviewed ? ` is-unreviewed is-unreviewed-${session.status}` : "")}
-      aria-label={(session.cli === "codex" ? "Codex" : "Claude") + " terminal " + session.title}
+      aria-label={(session.cli === "codex" ? "Codex" : "Claude") + " terminal " + displayTitle}
       onMouseDown={() => onFocus(session.id)}
       onFocusCapture={() => onFocus(session.id)}
       onDragEnter={(event) => {
@@ -334,7 +377,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
         <div className="terminal-lights" aria-hidden="true"><i /><i /><i /></div>
         <div className="terminal-context">
           <TerminalIcon size={15} />
-          <span className="terminal-title" title={session.title}>{session.title}</span>
+          <span className="terminal-title" title={displayTitle}>{displayTitle}</span>
           <span className="terminal-separator">/</span>
           <span className="terminal-path" title={session.cwd}>{session.cwd}</span>
         </div>
@@ -344,7 +387,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
           </span>
           <span className={"cli-badge is-" + session.cli}>{session.cli === "codex" ? "Codex CLI" : "Claude Code"}</span>
         </div>
-        <button className="terminal-close" type="button" title="ターミナルを閉じる" aria-label={session.title + " を閉じる"} onDragStart={(event) => event.preventDefault()} onClick={(event) => { event.stopPropagation(); onClose(session.id); }}><X size={16} /></button>
+        <button className="terminal-close" type="button" title="ターミナルを閉じる" aria-label={displayTitle + " を閉じる"} onDragStart={(event) => event.preventDefault()} onClick={(event) => { event.stopPropagation(); onClose(session.id); }}><X size={16} /></button>
       </header>
       <div className="terminal-body">
         {imageDropActive && <div className="image-drop-overlay" aria-hidden="true">画像をドロップして添付</div>}

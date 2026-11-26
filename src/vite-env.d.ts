@@ -2,10 +2,14 @@
 
 export type SessionCli = "claude" | "codex";
 export type SessionStatus = "idle" | "running" | "completed" | "approval" | "exited";
+export type ThemeSetting = "system" | "light" | "dark";
 
 export interface CimLineSession {
   id: string;
+  /** Folder-derived fallback title. */
   title: string;
+  /** Session name emitted by Codex or Claude, or an empty string if unnamed. */
+  agentTitle: string;
   cwd: string;
   cli: SessionCli;
   closed: boolean;
@@ -19,6 +23,8 @@ export interface InitialState {
   sessions: CimLineSession[];
   cliAvailable: Record<SessionCli, boolean>;
   defaultDirectory: string;
+  theme: ThemeSetting;
+  zoomFactor: number;
 }
 
 export interface PtySnapshot {
@@ -52,10 +58,13 @@ export interface CodexRateLimits {
 export interface CodexDeskApi {
   platform: "win32" | "darwin" | "linux";
   getState: () => Promise<InitialState>;
+  setTheme: (theme: ThemeSetting) => Promise<ThemeSetting>;
+  adjustZoom: (delta: number) => Promise<number>;
   getRateLimits: () => Promise<CodexRateLimits>;
   chooseFolder: () => Promise<string | null>;
   createSession: (input: { cwd: string; cli: SessionCli }) => Promise<CimLineSession>;
   setSessionTitle: (id: string, title: string) => Promise<boolean>;
+  setAgentTitle: (id: string, title: string) => Promise<boolean>;
   closeSession: (id: string) => Promise<CimLineSession>;
   reopenSession: (id: string) => Promise<CimLineSession>;
   deleteSession: (id: string) => Promise<boolean>;

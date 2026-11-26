@@ -23,13 +23,19 @@ npm run dev
 
 `npm run build` runs the TypeScript check and Vite production build. Windows and macOS installers use `npm run package:win` and `npm run package:mac`. `node-pty` is native; preserve its Electron rebuild and archive unpack settings.
 
+## Appearance and zoom
+
+- Theme: Settings offers system / light / dark, saved as `theme` in `<userData>/settings.json`. Main sets `nativeTheme.themeSource`, so the renderer uses `prefers-color-scheme`. Colors in `src/index.css` use `--c-*` variables with a dark value and a light value; define both when adding a color. xterm switches its ANSI palette when the system color scheme changes.
+- Zoom: Cmd/Ctrl + `+` and `-` change the window zoom; Cmd/Ctrl + `0` resets it. Main validates the step, clamps the zoom factor, and persists it with the theme in `<userData>/settings.json`.
+
 ## Terminal behavior
 
-- Windows shells default to `pwsh`, then `powershell.exe`; macOS uses the login shell and falls back to `/bin/zsh`.
+- Windows shells default to `pwsh`, then `powershell.exe`; `CIMLINE_SHELL=cmd.exe` uses `cmd` syntax (`cd /d`). macOS uses the login shell and falls back to `/bin/zsh`.
 - A pane starts either `codex` or `claude` in its selected folder. Reopening history uses `codex resume --last` or `claude --continue`.
 - Closing a pane stops its process tree, but retains its folder, CLI, and metadata in session history.
 - The terminal UI must remain directly interactive. Do not replace it with a log viewer or a separate follow-up prompt form.
 - Use xterm's resize events to size the PTY. Keep each session's in-memory replay buffer bounded to 512 KB and sequence output to avoid duplicate writes when a pane attaches.
+- Filter only `ESC[3J` from replay, queued, and live terminal output so screen redraws do not erase the scrollback history.
 - Respect terminal keyboard behavior: Ctrl+C interrupts unless text is selected; copy, paste, and right-click behavior follow the platform conventions documented in README.
 - Keep pane status in main-process session metadata. Persist only the status, timestamp, and unread flag alongside the existing session metadata; never persist the PTY buffer, prompts, or CLI output.
 - Generate Claude hooks and Codex `notify` overrides per CimLine session. Store generated config under Electron `userData`, pass it only to that CLI run, and do not modify global Claude or Codex configuration files. Send only session ID and event name through the random-port loopback notifier; drain hook stdin without retaining it.

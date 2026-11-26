@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, Notification, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, Notification, shell } = require("electron");
 const { spawn, execFile, execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -46,6 +46,10 @@ const MAX_RATE_LIMIT_ERROR_CHARS = 2048;
 const MAX_NOTIFY_BODY_BYTES = 8 * 1024;
 const MAX_INPUT_LINE_CHARS = 16 * 1024;
 const SESSION_STATUSES = new Set(["idle", "running", "completed", "approval", "exited"]);
+const THEME_SETTINGS = new Set(["system", "light", "dark"]);
+const MIN_ZOOM_FACTOR = 0.75;
+const MAX_ZOOM_FACTOR = 1.5;
+const ZOOM_STEP = 0.1;
 const NOTIFY_EVENTS = new Set(["idle", "running", "completed", "approval"]);
 const NOTIFY_ENDPOINT = "/notify";
 
@@ -60,11 +64,104 @@ let sessionPersistenceReady = false;
 let quitFlushStarted = false;
 let quitFlushComplete = false;
 let codexStartupQueue = Promise.resolve();
+let settingsStorePath = null;
+let themeSetting = "system";
+let zoomFactor = 1;
+let settingsWriteChain = Promise.resolve();
+
+function normalizeThemeSetting(value) {
+  return THEME_SETTINGS.has(value) ? value : "system";
+}
+
+function loadSettings() {
+  settingsStorePath = path.join(app.getPath("userData"), "settings.json");
+  try {
+    const stats = fs.statSync(settingsStorePath);
+    if (stats.isFile() && stats.size <= 16 * 1024) {
+      const settings = JSON.parse(fs.readFileSync(settingsStorePath, "utf8"));
+      themeSetting = normalizeThemeSetting(settings?.theme);
+      if (typeof settings?.zoomFactor === "number" && Number.isFinite(settings.zoomFactor)) {
+        zoomFactor = Math.max(MIN_ZOOM_FACTOR, Math.min(MAX_ZOOM_FACTOR, settings.zoomFactor));
+      }
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn("設定を読み込めませんでした:", error?.message || error);
+  }
+  nativeTheme.themeSource = themeSetting;
+}
+
+async function persistSettings() {
+  if (!settingsStorePath) return;
+  const write = async () => {
+    const contents = JSON.stringify({ theme: themeSetting, zoomFactor }, null, 2);
+    const temporaryPath = settingsStorePath + "." + process.pid + "." + Date.now() + "." + Math.random().toString(16).slice(2) + ".tmp";
+    await fs.promises.mkdir(path.dirname(settingsStorePath), { recursive: true });
+    try {
+      await fs.promises.writeFile(temporaryPath, contents, "utf8");
+      await fs.promises.rename(temporaryPath, settingsStorePath);
+    } catch (error) {
+      await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
+      throw error;
+    }
+  };
+  settingsWriteChain = settingsWriteChain.catch(() => {}).then(write);
+  return settingsWriteChain;
+}
+
+async function setThemeSetting(value) {
+  if (typeof value !== "string" || !THEME_SETTINGS.has(value)) throw new Error("テーマ設定が無効です。");
+  const previousTheme = themeSetting;
+  themeSetting = value;
+  nativeTheme.themeSource = themeSetting;
+  try {
+    await persistSettings();
+  } catch (error) {
+    themeSetting = previousTheme;
+    nativeTheme.themeSource = previousTheme;
+    throw error;
+  }
+  return themeSetting;
+}
+
+async function setZoomFactor(nextZoomFactor) {
+  if (typeof nextZoomFactor !== "number" || !Number.isFinite(nextZoomFactor)) throw new Error("拡大率が無効です。");
+  const previousZoomFactor = zoomFactor;
+  zoomFactor = Math.max(MIN_ZOOM_FACTOR, Math.min(MAX_ZOOM_FACTOR, nextZoomFactor));
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.setZoomFactor(zoomFactor);
+  }
+  try {
+    await persistSettings();
+  } catch (error) {
+    zoomFactor = previousZoomFactor;
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.setZoomFactor(zoomFactor);
+    }
+    throw error;
+  }
+  return zoomFactor;
+}
+
+async function adjustZoom(delta) {
+  if (typeof delta !== "number" || !Number.isFinite(delta) || ![-ZOOM_STEP, 0, ZOOM_STEP].includes(delta)) {
+    throw new Error("拡大率の変更量が無効です。");
+  }
+  return setZoomFactor(delta === 0 ? 1 : Math.round((zoomFactor + delta) * 100) / 100);
+}
+
+function normalizeShellOverride(value) {
+  const trimmed = String(value || "").trim();
+  if (trimmed.length >= 2 && ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
 
 function serializeSession(session) {
   return {
     id: session.id,
     title: session.title,
+    agentTitle: session.agentTitle || "",
     cwd: session.cwd,
     cli: session.cli,
     closed: session.closed === true,
@@ -81,9 +178,14 @@ function normalizeSession(record) {
   const cli = record.cli === "claude" ? "claude" : record.cli === "codex" ? "codex" : null;
   if (!cli) return null;
   const cwd = path.resolve(record.cwd);
+  const folderTitle = path.basename(cwd) || cwd;
+  const savedTitle = typeof record.title === "string" ? record.title.trim().slice(0, 300) : "";
+  const legacyAgentTitle = savedTitle && savedTitle.toLocaleLowerCase() !== folderTitle.toLocaleLowerCase() ? savedTitle : "";
+  const agentTitle = cleanAgentTitle(typeof record.agentTitle === "string" ? record.agentTitle : legacyAgentTitle);
   return {
     id: record.id.slice(0, 160),
-    title: typeof record.title === "string" && record.title.trim() ? record.title.slice(0, 300) : path.basename(cwd) || cwd,
+    title: folderTitle,
+    agentTitle,
     cwd,
     cli,
     closed: true,
@@ -244,7 +346,7 @@ function notifyAttention(session, status) {
   try {
     if (typeof Notification?.isSupported === "function" && !Notification.isSupported()) return;
     const message = status === "approval" ? "承認または入力を待っています" : "作業が完了しました";
-    new Notification({ title: `CimLine · ${session.title}`, body: message }).show();
+    new Notification({ title: `CimLine · ${session.agentTitle || session.title}`, body: message }).show();
   } catch {}
 }
 
@@ -1249,6 +1351,7 @@ async function getSkills(projectPaths) {
 function shellQuote(value, kind) {
   const text = String(value);
   if (kind === "powershell") return "'" + text.replace(/'/g, "''") + "'";
+  if (kind === "cmd") return '"' + text.replace(/"/g, '""') + '"';
   return "'" + text.replace(/'/g, "'\\''") + "'";
 }
 
@@ -1339,14 +1442,16 @@ function isCliAvailable(cli) {
 
 function getShellInfo() {
   if (process.platform === "win32") {
-    const override = process.env.CIMLINE_SHELL?.trim();
+    const override = normalizeShellOverride(process.env.CIMLINE_SHELL);
     const shellPath = override
       ? resolveOnPath(override) || override
       : resolveOnPath("pwsh.exe") || resolveOnPath("pwsh") || resolveOnPath("powershell.exe") || path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
     const baseName = path.basename(shellPath).toLowerCase();
-    return { file: shellPath, args: ["-NoLogo", "-NoExit"], kind: /^(pwsh|powershell)(\.exe)?$/.test(baseName) ? "powershell" : "posix" };
+    if (/^cmd(?:\.exe)?$/.test(baseName)) return { file: shellPath, args: ["/D", "/Q", "/K"], kind: "cmd" };
+    if (/^(pwsh|powershell)(\.exe)?$/.test(baseName)) return { file: shellPath, args: ["-NoLogo", "-NoExit"], kind: "powershell" };
+    return { file: shellPath, args: [], kind: "posix" };
   }
-  const override = process.env.CIMLINE_SHELL?.trim();
+  const override = normalizeShellOverride(process.env.CIMLINE_SHELL);
   const shellPath = override || process.env.SHELL || (fs.existsSync("/bin/zsh") ? "/bin/zsh" : "/bin/bash");
   return { file: shellPath, args: ["-l"], kind: "posix" };
 }
@@ -1363,6 +1468,7 @@ function buildLaunchCommand(session, resume, shellKind, hooks) {
   const command = [shellQuote(cli.file, shellKind), ...args.map((argument) => shellQuote(argument, shellKind))].join(" ");
   const directory = shellQuote(session.cwd, shellKind);
   if (shellKind === "powershell") return "Set-Location -LiteralPath " + directory + "; & " + command;
+  if (shellKind === "cmd") return "cd /d " + directory + " && " + command;
   return "cd -- " + directory + " && " + command;
 }
 
@@ -1536,6 +1642,7 @@ function createSession(input) {
   const session = {
     id: randomUUID(),
     title: path.basename(cwd) || cwd,
+    agentTitle: "",
     cwd,
     cli,
     closed: true,
@@ -1559,15 +1666,23 @@ function createSession(input) {
   return serializeSession(session);
 }
 
-function setSessionTitle(sessionId, title) {
+function cleanAgentTitle(title) {
+  return String(title ?? "")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 300);
+}
+
+function setSessionAgentTitle(sessionId, title) {
   const session = sessions.get(String(sessionId));
   if (!session) throw new Error("セッションが見つかりません。");
   if (!livePtys.has(session.id)) return false;
   if (typeof title !== "string" || title.length > 300) throw new Error("セッション名が無効です。");
-  const normalizedTitle = title.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/\s+/g, " ").trim();
+  const normalizedTitle = cleanAgentTitle(title);
   if (!normalizedTitle) return false;
-  if (normalizedTitle === session.title) return true;
-  session.title = normalizedTitle;
+  if (normalizedTitle === session.agentTitle) return true;
+  session.agentTitle = normalizedTitle;
   broadcastSessions();
   return true;
 }
@@ -1665,7 +1780,11 @@ function registerIpc() {
     sessions: serializeSessions(),
     cliAvailable: { codex: isCliAvailable("codex"), claude: isCliAvailable("claude") },
     defaultDirectory: process.env.CIMLINE_DEFAULT_PROJECT || process.env.CODEX_DEFAULT_PROJECT || (app.isPackaged ? app.getPath("documents") : process.cwd()),
+    theme: themeSetting,
+    zoomFactor,
   }));
+  ipcMain.handle("settings:set-theme", (_event, value) => setThemeSetting(value));
+  ipcMain.handle("settings:adjust-zoom", (_event, delta) => adjustZoom(delta));
   ipcMain.handle("usage:get-rate-limits", () => getCodexRateLimits());
   ipcMain.handle("dialog:choose-folder", async () => {
     const options = {
@@ -1678,7 +1797,8 @@ function registerIpc() {
     return result.canceled ? null : result.filePaths[0] || null;
   });
   ipcMain.handle("sessions:create", (_event, input) => createSession(input || {}));
-  ipcMain.handle("sessions:set-title", (_event, id, title) => setSessionTitle(id, title));
+  ipcMain.handle("sessions:set-title", (_event, id, title) => setSessionAgentTitle(id, title));
+  ipcMain.handle("sessions:set-agent-title", (_event, id, title) => setSessionAgentTitle(id, title));
   ipcMain.handle("sessions:close", (_event, id) => closeSession(id));
   ipcMain.handle("sessions:reopen", (_event, id) => reopenSession(id));
   ipcMain.handle("sessions:delete", (_event, id) => deleteSession(id));
@@ -1721,7 +1841,7 @@ function createWindow() {
     height: 960,
     minWidth: 990,
     minHeight: 700,
-    backgroundColor: "#11120f",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#11120f" : "#f6f7f3",
     title: "CimLine",
     icon: getWindowIcon(),
     webPreferences: {
@@ -1731,6 +1851,12 @@ function createWindow() {
       sandbox: true,
     },
   });
+  window.webContents.setZoomFactor(zoomFactor);
+  const updateWindowBackground = () => {
+    if (!window.isDestroyed()) window.setBackgroundColor(nativeTheme.shouldUseDarkColors ? "#11120f" : "#f6f7f3");
+  };
+  nativeTheme.on("updated", updateWindowBackground);
+  window.once("closed", () => nativeTheme.removeListener("updated", updateWindowBackground));
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("https://") || url.startsWith("http://")) shell.openExternal(url);
     return { action: "deny" };
@@ -1746,6 +1872,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  loadSettings();
   loadPersistedSessions();
   try { await startNotifyServer(); }
   catch (error) { console.warn("状態通知サーバーを起動できませんでした:", error?.message || error); }

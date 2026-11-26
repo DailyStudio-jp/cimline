@@ -20,11 +20,23 @@ function loadPreload(getPathForFile, invoke = async () => {}) {
   return exposedApi;
 }
 
-test("preload sends session title updates through the dedicated IPC channel", async () => {
+test("preload sends legacy and separate agent-title updates through their IPC channels", async () => {
   const calls = [];
   const api = loadPreload((file) => file.path, async (...args) => calls.push(args));
   await api.setSessionTitle("session-1", "Fix terminal session title");
-  assert.deepEqual(calls, [["sessions:set-title", "session-1", "Fix terminal session title"]]);
+  await api.setAgentTitle("session-1", "Fix terminal session title");
+  assert.deepEqual(calls, [
+    ["sessions:set-title", "session-1", "Fix terminal session title"],
+    ["sessions:set-agent-title", "session-1", "Fix terminal session title"],
+  ]);
+});
+
+test("preload exposes theme and bounded zoom IPC methods", async () => {
+  const calls = [];
+  const api = loadPreload((file) => file.path, async (...args) => calls.push(args));
+  await api.setTheme("light");
+  await api.adjustZoom(0.1);
+  assert.deepEqual(calls, [["settings:set-theme", "light"], ["settings:adjust-zoom", 0.1]]);
 });
 
 test("preload returns native paths for supported image extensions including Unicode names", () => {
