@@ -293,6 +293,7 @@ function TerminalPaneView({ session, statusLabel, statusAge, focused, reorderabl
 
   return (
     <article
+      data-session-id={session.id}
       className={"terminal-pane" + (reorderable ? " is-reorderable" : "") + (dragging ? " is-dragging" : "") + (dropTarget ? " is-drop-target" : "") + (focused ? " is-focused" : "") + (unreviewed ? ` is-unreviewed is-unreviewed-${session.status}` : "")}
       aria-label={(session.cli === "codex" ? "Codex" : "Claude") + " terminal " + session.title}
       onMouseDown={() => onFocus(session.id)}

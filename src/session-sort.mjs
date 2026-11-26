@@ -47,6 +47,17 @@ export function sortSessions(sessions, order, mode) {
   });
 }
 
+export function moveSessionInOrder(sessionIds, sourceId, targetId) {
+  if (!Array.isArray(sessionIds) || typeof sourceId !== "string" || typeof targetId !== "string" || sourceId === targetId) return null;
+  const next = [...sessionIds];
+  const sourceIndex = next.indexOf(sourceId);
+  const targetIndex = next.indexOf(targetId);
+  if (sourceIndex < 0 || targetIndex < 0) return null;
+  next.splice(sourceIndex, 1);
+  next.splice(targetIndex, 0, sourceId);
+  return next;
+}
+
 export function isSessionSortMode(value) {
   return SORT_MODES.has(value);
 }

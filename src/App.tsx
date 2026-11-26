@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 import {
   Activity,
   AlertCircle,
@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { TerminalPane, type TerminalSession } from "@/components/TerminalPane";
 import { countReviewFilterResults, filterActiveSessions, isUnreviewedTerminal, nextReviewingSessionIdAfterReopen, retainReviewingSessionId } from "@/session-filter.mjs";
-import { isSessionSortMode, sortSessions, type SessionSortMode } from "@/session-sort.mjs";
+import { isSessionSortMode, moveSessionInOrder, sortSessions, type SessionSortMode } from "@/session-sort.mjs";
 import type { SessionStatus } from "@/vite-env";
 import { Separator } from "@/components/ui/separator";
 
@@ -169,6 +169,9 @@ export default function App() {
   const [draggingSessionId, setDraggingSessionId] = useState<string | null>(null);
   const [dropTargetSessionId, setDropTargetSessionId] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const terminalGridRef = useRef<HTMLDivElement>(null);
+  const previousTerminalPositionsRef = useRef(new Map<string, { left: number; top: number }>());
+  const terminalMoveAnimationsRef = useRef(new Map<string, Animation>());
   const composerRef = useRef<HTMLDialogElement>(null);
   const usageRef = useRef<HTMLDialogElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -315,6 +318,7 @@ export default function App() {
   const filterOptions = { query, showUnreviewedOnly, reviewingSessionId };
   const reviewFilterCount = countReviewFilterResults(sortedActiveSessions, filterOptions);
   const filteredActiveSessions = filterActiveSessions(sortedActiveSessions, filterOptions);
+  const visibleSessionOrder = filteredActiveSessions.map((session) => session.id).join("\u0000");
   const historySessions = useMemo(() => sessions
     .filter((session) => session.closed)
     .filter((session) => !query || [session.title, session.cwd, cliName(session.cli)].some((value) => value.toLowerCase().includes(query)))
@@ -323,6 +327,54 @@ export default function App() {
     ? [rateLimits.primary, rateLimits.secondary].filter((item): item is RateWindow => Boolean(item))
       .sort((left, right) => (left.windowDurationMins ?? Number.MAX_SAFE_INTEGER) - (right.windowDurationMins ?? Number.MAX_SAFE_INTEGER))
     : [], [rateLimits]);
+
+  useLayoutEffect(() => {
+    const grid = terminalGridRef.current;
+    if (!grid) {
+      previousTerminalPositionsRef.current.clear();
+      for (const animation of terminalMoveAnimationsRef.current.values()) animation.cancel();
+      terminalMoveAnimationsRef.current.clear();
+      return;
+    }
+
+    const panes = Array.from(grid.querySelectorAll<HTMLElement>("[data-session-id]"));
+    const visibleIds = new Set(panes.map((pane) => pane.dataset.sessionId).filter((id): id is string => Boolean(id)));
+    for (const [id, animation] of terminalMoveAnimationsRef.current) {
+      if (!visibleIds.has(id)) {
+        animation.cancel();
+        terminalMoveAnimationsRef.current.delete(id);
+      }
+    }
+
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const nextPositions = new Map<string, { left: number; top: number }>();
+    for (const pane of panes) {
+      const id = pane.dataset.sessionId;
+      if (!id) continue;
+      terminalMoveAnimationsRef.current.get(id)?.cancel();
+      terminalMoveAnimationsRef.current.delete(id);
+
+      const rect = pane.getBoundingClientRect();
+      const position = { left: rect.left, top: rect.top };
+      nextPositions.set(id, position);
+      const previous = previousTerminalPositionsRef.current.get(id);
+      if (!previous || reducedMotion || typeof pane.animate !== "function") continue;
+
+      const deltaX = previous.left - position.left;
+      const deltaY = previous.top - position.top;
+      if (Math.abs(deltaX) < 2 && Math.abs(deltaY) < 2) continue;
+
+      const animation = pane.animate([
+        { transform: `translate(${deltaX}px, ${deltaY}px)`, outline: "2px solid rgb(200 243 108 / 85%)", outlineOffset: "2px" },
+        { transform: "translate(0, 0)", outline: "0 solid transparent", outlineOffset: "0px" },
+      ], { duration: 420, easing: "cubic-bezier(0.22, 1, 0.36, 1)" });
+      terminalMoveAnimationsRef.current.set(id, animation);
+      animation.onfinish = () => {
+        if (terminalMoveAnimationsRef.current.get(id) === animation) terminalMoveAnimationsRef.current.delete(id);
+      };
+    }
+    previousTerminalPositionsRef.current = nextPositions;
+  }, [visibleSessionOrder]);
 
   function openComposer(path?: string) {
     setFolderPath(path || folderPath || defaultDirectory || recentFolders[0]?.path || "");
@@ -467,17 +519,21 @@ export default function App() {
       setDropTargetSessionId(null);
       return;
     }
-    const next = sortedActiveSessions.map((session) => session.id);
-    const sourceIndex = next.indexOf(sourceId);
-    const targetIndex = next.indexOf(sessionId);
-    if (sourceIndex < 0 || targetIndex < 0) return;
-    next.splice(sourceIndex, 1);
-    next.splice(targetIndex, 0, sourceId);
+    const next = moveSessionInOrder(sortedActiveSessions.map((session) => session.id), sourceId, sessionId);
+    if (!next) {
+      setDraggingSessionId(null);
+      setDropTargetSessionId(null);
+      return;
+    }
     setSessionOrder(next);
     localStorage.setItem(sessionOrderStorageKey, JSON.stringify(next));
+    if (sessionSortMode !== "manual") {
+      setSessionSortMode("manual");
+      localStorage.setItem(sessionSortStorageKey, "manual");
+    }
     setDraggingSessionId(null);
     setDropTargetSessionId(null);
-  }, [draggingSessionId, sortedActiveSessions]);
+  }, [draggingSessionId, sortedActiveSessions, sessionSortMode]);
 
   function showUsage() {
     setUsageOpen(true);
@@ -588,7 +644,7 @@ export default function App() {
         {bridgeError && <div className="bridge-error"><AlertCircle size={15} /><span>{bridgeError}</span></div>}
         <main className="workspace">
           {filteredActiveSessions.length ? (
-            <div className="terminal-grid">
+            <div className="terminal-grid" ref={terminalGridRef}>
               {filteredActiveSessions.map((session) => (
                 <TerminalPane
                   key={session.id}
@@ -596,7 +652,7 @@ export default function App() {
                   statusLabel={sessionStatusLabel(session.status)}
                   statusAge={statusAgeLabel(session.statusAt, statusClock)}
                   focused={focusedSessionId === session.id}
-                  reorderable={sessionSortMode === "manual"}
+                  reorderable={true}
                   dragging={draggingSessionId === session.id}
                   dropTarget={dropTargetSessionId === session.id}
                   onClose={closeSession}

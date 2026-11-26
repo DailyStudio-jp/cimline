@@ -133,11 +133,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid #a6ca69; outline-
 .terminal-grid { display: grid; min-height: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: minmax(360px, calc((100dvh - 104px) / 2)); align-content: start; gap: 15px; }
 .terminal-grid > .terminal-pane:last-child:nth-child(odd) { grid-column: 1 / -1; }
 .terminal-pane { display: flex; min-width: 0; min-height: 340px; flex-direction: column; overflow: hidden; border: 1px solid #373a31; border-radius: 7px; background: #151613; box-shadow: 0 5px 20px rgb(0 0 0 / 12%); transition: border-color .16s ease, box-shadow .16s ease, opacity .16s ease; }
-.terminal-pane.is-focused { border-color: #697e49; box-shadow: 0 0 0 1px rgb(166 202 105 / 19%), 0 8px 22px rgb(0 0 0 / 17%); }
+.terminal-pane.is-focused { border-color: #c8f36c; box-shadow: 0 0 0 2px rgb(200 243 108 / 34%), 0 0 24px rgb(200 243 108 / 22%), 0 8px 22px rgb(0 0 0 / 17%); }
 .terminal-pane.is-unreviewed { border-color: #91b954; box-shadow: 0 0 0 1px rgb(174 219 105 / 31%), 0 0 24px rgb(150 198 81 / 19%), 0 8px 22px rgb(0 0 0 / 17%); }
 .terminal-pane.is-unreviewed .terminal-titlebar { border-bottom-color: #536c37; background: #22271d; }
 .terminal-pane.is-unreviewed-approval { border-color: #cb9254; box-shadow: 0 0 0 1px rgb(220 162 91 / 34%), 0 0 24px rgb(202 135 61 / 19%), 0 8px 22px rgb(0 0 0 / 17%); }
 .terminal-pane.is-unreviewed-approval .terminal-titlebar { border-bottom-color: #755333; background: #29221b; }
+.terminal-pane.is-focused.is-unreviewed,
+.terminal-pane.is-focused.is-unreviewed-approval { border-color: #c8f36c; box-shadow: 0 0 0 2px rgb(200 243 108 / 42%), 0 0 26px rgb(200 243 108 / 23%), 0 8px 22px rgb(0 0 0 / 17%); }
+.terminal-pane.is-focused .terminal-titlebar { border-bottom-color: #9abc59; }
 .terminal-pane.is-dragging { opacity: .54; }
 .terminal-pane.is-drop-target { border-color: #c8f36c; box-shadow: inset 0 0 0 2px rgb(200 243 108 / 24%), 0 0 20px rgb(200 243 108 / 10%); }
 .terminal-titlebar { display: grid; min-height: 49px; flex: 0 0 49px; grid-template-columns: 47px minmax(0, 1fr) auto 29px; align-items: center; gap: 9px; padding: 0 10px; border-bottom: 1px solid #2d3029; background: #1d1f1a; cursor: default; user-select: none; }

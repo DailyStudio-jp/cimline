@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sortSessions } from "../src/session-sort.mjs";
+import { moveSessionInOrder, sortSessions } from "../src/session-sort.mjs";
 
 const sessions = [
   { id: "older", createdAt: "2026-01-01T00:00:00.000Z", statusAt: "2026-01-01T02:00:00.000Z" },
@@ -21,6 +21,12 @@ test("updated sessions sort by status change time and move new activity to the c
 
 test("manual order remains available and places new entries by addition date", () => {
   assert.deepEqual(sortSessions(sessions, ["middle", "older"], "manual").map(({ id }) => id), ["middle", "older", "not-yet-updated", "newer"]);
+});
+
+test("dragging in an automatic order can preserve the visible order as manual", () => {
+  const visibleOrder = sortSessions(sessions, [], "updated-asc").map(({ id }) => id);
+  assert.deepEqual(moveSessionInOrder(visibleOrder, "older", "middle"), ["not-yet-updated", "middle", "older", "newer"]);
+  assert.equal(moveSessionInOrder(visibleOrder, "older", "missing"), null);
 });
 
 test("submitting a prompt refreshes status time and moves the session to the last position", () => {
