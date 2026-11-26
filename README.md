@@ -6,10 +6,18 @@ The app also shows Codex account usage limits (5-hour and weekly windows) and li
 
 ## Requirements
 
-- Node.js 24 or later
 - Windows or macOS
 - At least one CLI installed and authenticated: `codex` or `claude`
 - PowerShell (`pwsh`, with `powershell.exe` as fallback) on Windows, or a login shell on macOS
+- Node.js 24 or later with npm, when running CimLine from this source repository
+
+## First-time setup
+
+Install [Node.js](https://nodejs.org/en/download/) 24 or later, then install and sign in to at least one CLI using its official instructions: [Codex CLI](https://github.com/openai/codex#installing-and-running-codex-cli) or [Claude Code](https://code.claude.com/docs/en/setup).
+
+On the first source launch, `start-cimline.bat` on Windows and `start-cimline.command` on macOS run `npm install` when CimLine's local dependencies are missing. This downloads the dependencies into `node_modules`. The launch scripts expect Node.js/npm and a signed-in CLI to be installed first.
+
+The Node.js requirement applies to running from the source repository. It is not needed to run a packaged CimLine installer; a Codex or Claude CLI installation is still required.
 
 ## Development
 
@@ -18,9 +26,9 @@ npm install
 npm run dev
 ```
 
-On Windows, double-click [`start-cimline.bat`](./start-cimline.bat) to install missing dependencies and start the development app.
+On Windows, double-click [`start-cimline.bat`](./start-cimline.bat) to install missing project dependencies and start the development app.
 
-On macOS, double-click [`start-cimline.command`](./start-cimline.command) in Finder to install missing dependencies and start the development app in Terminal. If a change affects `electron/main.cjs` or `electron/preload.cjs`, fully stop and restart the app; Vite hot reload only updates the renderer.
+On macOS, double-click [`start-cimline.command`](./start-cimline.command) in Finder to install missing project dependencies and start the development app in Terminal. If a change affects `electron/main.cjs` or `electron/preload.cjs`, fully stop and restart the app; Vite hot reload only updates the renderer.
 
 ## Keyboard shortcuts
 
