@@ -9,13 +9,15 @@ The app also shows Codex account usage limits (5-hour and weekly windows) and li
 - Windows or macOS
 - At least one CLI installed and authenticated: `codex` or `claude`
 - PowerShell (`pwsh`, with `powershell.exe` as fallback) on Windows, or a login shell on macOS
-- Node.js 24 or later with npm, when running CimLine from this source repository
+- Node.js 24 or later with npm, when running CimLine from this source repository. The launch scripts can install Node.js when WinGet (Windows) or Homebrew (macOS) is available.
 
 ## First-time setup
 
-Install [Node.js](https://nodejs.org/en/download/) 24 or later, then install and sign in to at least one CLI using its official instructions: [Codex CLI](https://github.com/openai/codex#installing-and-running-codex-cli) or [Claude Code](https://code.claude.com/docs/en/setup).
+Install and sign in to at least one CLI using its official instructions: [Codex CLI](https://github.com/openai/codex#installing-and-running-codex-cli) or [Claude Code](https://code.claude.com/docs/en/setup). CimLine does not install these CLI tools or sign in to them.
 
-On the first source launch, `start-cimline.bat` on Windows and `start-cimline.command` on macOS run `npm install` when CimLine's local dependencies are missing. This downloads the dependencies into `node_modules`. The launch scripts expect Node.js/npm and a signed-in CLI to be installed first.
+On source launch, the scripts check for Node.js 24 or later with npm. If it is missing, `start-cimline.bat` tries to install the current LTS with WinGet on Windows, and `start-cimline.command` tries Homebrew on macOS. WinGet may show package prompts or a system approval prompt; Homebrew must already be installed. If automatic installation is unavailable or fails, the script opens the [Node.js download page](https://nodejs.org/en/download/).
+
+On the first source launch, both scripts run `npm install` when CimLine's local dependencies are missing. This downloads the dependencies into `node_modules`.
 
 The Node.js requirement applies to running from the source repository. It is not needed to run a packaged CimLine installer; a Codex or Claude CLI installation is still required.
 
