@@ -444,6 +444,34 @@ export default function App() {
   }, [notify]);
 
   useEffect(() => {
+    const focusSearchShortcut = (event: KeyboardEvent) => {
+      if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || target.closest("input, textarea, select, [contenteditable='true']"))) return;
+      if (document.querySelector("dialog[open]")) return;
+      event.preventDefault();
+      searchRef.current?.focus();
+    };
+    window.addEventListener("keydown", focusSearchShortcut, true);
+    return () => window.removeEventListener("keydown", focusSearchShortcut, true);
+  }, []);
+
+  useEffect(() => {
+    const openNewTerminalShortcut = (event: KeyboardEvent) => {
+      const isMac = bridge().platform === "darwin";
+      if (!(isMac ? event.metaKey : event.ctrlKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "n") return;
+      if (document.querySelector("dialog[open]")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setFolderPath((current) => current || defaultDirectory || recentFolders[0]?.path || "");
+      setSelectedCli((current) => localStorage.getItem(lastCliStorageKey) === "claude" ? "claude" : current);
+      setComposerOpen(true);
+    };
+    window.addEventListener("keydown", openNewTerminalShortcut, true);
+    return () => window.removeEventListener("keydown", openNewTerminalShortcut, true);
+  }, [defaultDirectory, recentFolders]);
+
+  useEffect(() => {
     if (!sessionsInitialized) return;
     const active = sessions.filter((session) => !session.closed);
     const currentIds = new Set(active.map((session) => session.id));
@@ -730,7 +758,7 @@ export default function App() {
             {sidebarCollapsed ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
           </button>
         </div>
-        <button className="sidebar-new" type="button" onClick={() => openComposer()} aria-label="新しいターミナル" title="新しいターミナル"><Plus size={17} /><span>新しいターミナル</span><kbd>Ctrl N</kbd></button>
+        <button className="sidebar-new" type="button" onClick={() => openComposer()} aria-label="新しいターミナル" title="新しいターミナル"><Plus size={17} /><span>新しいターミナル</span><kbd>{bridge().platform === "darwin" ? "⌘ N" : "Ctrl N"}</kbd></button>
         <nav className="sidebar-nav" aria-label="メインメニュー">
           <button className="sidebar-nav-item is-active" type="button" aria-label="ターミナル" title="ターミナル"><TerminalIcon size={16} /><span>ターミナル</span><span className="nav-count">{sessions.filter((session) => !session.closed).length}</span></button>
           <button className="sidebar-nav-item" type="button" onClick={showUsage} aria-label="使用量" title="使用量"><Activity size={15} /><span>使用量</span></button>

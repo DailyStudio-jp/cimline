@@ -22,6 +22,23 @@ On Windows, double-click [`start-cimline.bat`](./start-cimline.bat) to install m
 
 On macOS, double-click [`start-cimline.command`](./start-cimline.command) in Finder to install missing dependencies and start the development app in Terminal. If a change affects `electron/main.cjs` or `electron/preload.cjs`, fully stop and restart the app; Vite hot reload only updates the renderer.
 
+## Keyboard shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `/` | Focus terminal search when a text field or dialog is not active |
+| `Ctrl+N` on Windows; `Cmd+N` on macOS | Open the new terminal dialog |
+| `Ctrl` + `+` / `-` / `0` on Windows; `Cmd` + `+` / `-` / `0` on macOS | Zoom in / out / reset |
+| `Ctrl` + wheel on Windows; `Ctrl` or `Cmd` + wheel, or pinch on macOS | Change the terminal grid from 1 to 6 columns |
+| `Alt` + wheel anywhere in the workspace | Scroll the workspace |
+| Windows: `Ctrl+C` | Copy selected text; with no selection, send Ctrl+C to the CLI |
+| Windows: `Ctrl+Shift+C`, `Ctrl+V`, `Ctrl+Shift+V` | Copy selection, paste, paste |
+| macOS: `Cmd+C`, `Cmd+V` | Copy selected text, paste; `Cmd+C` with no selection is ignored |
+| macOS: `Ctrl+C` | Send Ctrl+C to the CLI |
+| Any platform: right-click in a terminal | Copy selected text, or paste when there is no selection |
+
+Other terminal keys are passed through to the selected CLI, except for the app-level shortcuts above.
+
 ## Build installers
 
 ```powershell
@@ -67,3 +84,7 @@ Hooks send only the pane ID and event name to a random-port HTTP listener bound 
 ## Skills and plugins
 
 Codex CLI remains responsible for interactive `/` commands and `$` skill invocations inside a Codex terminal. CimLine's Skills view reads the local Codex skill and plugin cache for browsing. Account usage displays the 5-hour and weekly rate-limit windows reported by the Codex account API; the API reports used percentages and reset times, not a remaining-token count.
+
+## Licenses
+
+CimLine does not currently have a project license selected or a `LICENSE` file. Resolved third-party dependency versions and the license expressions recorded in `package-lock.json` are listed in [`THIRD-PARTY-LICENSES.md`](./THIRD-PARTY-LICENSES.md). That inventory reflects package metadata and does not verify each package's license text.
