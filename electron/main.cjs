@@ -1687,10 +1687,21 @@ function isAppUrl(url) {
   }
 }
 
+function getWindowIcon() {
+  const fromDevServer = !app.isPackaged && process.argv.includes("--dev");
+  const assetDirectory = fromDevServer
+    ? path.join(__dirname, "../public")
+    : path.join(app.getAppPath(), "dist");
+  const svgPath = path.join(assetDirectory, "icon.svg");
+  try {
+    const svg = fs.readFileSync(svgPath, "utf8");
+    const icon = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`);
+    if (!icon.isEmpty()) return icon;
+  } catch {}
+  return nativeImage.createFromPath(path.join(assetDirectory, "dailystudio-favicon.png"));
+}
+
 function createWindow() {
-  const icon = !app.isPackaged && process.argv.includes("--dev")
-    ? path.join(__dirname, "../public/dailystudio-favicon.png")
-    : path.join(app.getAppPath(), "dist", "dailystudio-favicon.png");
   const window = new BrowserWindow({
     width: 1480,
     height: 960,
@@ -1698,7 +1709,7 @@ function createWindow() {
     minHeight: 700,
     backgroundColor: "#11120f",
     title: "CimLine",
-    icon,
+    icon: getWindowIcon(),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,

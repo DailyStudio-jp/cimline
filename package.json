@@ -54,7 +54,7 @@
       "package.json"
     ],
     "win": {
-      "icon": "build/icon.png",
+      "icon": "build/icon.svg",
       "target": [
         "nsis"
       ]
@@ -65,7 +65,7 @@
       "createDesktopShortcut": true
     },
     "mac": {
-      "icon": "build/icon.png",
+      "icon": "build/icon.svg",
       "target": ["dmg"],
       "category": "public.app-category.developer-tools"
     }

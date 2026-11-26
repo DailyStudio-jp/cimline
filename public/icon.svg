@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <title>DailyStudio icon</title>
+  <defs>
+    <clipPath id="flask-interior">
+      <path d="M244 174H268V239C268 258 273 275 285 291L350 373C362 389 351 408 332 408H180C161 408 150 389 162 373L227 291C239 275 244 258 244 239V174Z" />
+    </clipPath>
+  </defs>
+
+  <rect x="10" y="10" width="492" height="492" rx="96" fill="#FFFFFF" />
+
+  <!-- Floating star and the small accent dots from the studio mark. -->
+  <path d="M276 52L285 72L307 74L290 88L295 110L276 98L257 110L262 88L245 74L267 72L276 52Z" fill="#F0C34D" />
+  <circle cx="321" cy="69" r="12" fill="#7FC5A3" />
+  <circle cx="350" cy="96" r="9" fill="#F0C34D" />
+
+  <!-- Flag and connected mint blocks. -->
+  <path d="M67 277V128" stroke="#453E3B" stroke-width="11" stroke-linecap="round" />
+  <path d="M72 135C98 112 124 115 148 128C168 139 185 131 198 118L195 157C180 172 162 168 142 158C117 145 96 151 74 171L72 135Z" fill="#EC753C" />
+  <path d="M120 122L125 135L139 136L128 145L132 159L120 151L108 159L112 145L101 136L115 135L120 122Z" fill="#FFF0C8" />
+  <path d="M67 277H112M138 277H157" stroke="#453E3B" stroke-width="8" stroke-linecap="round" />
+  <rect x="37" y="264" width="39" height="27" rx="8" fill="#B5DCCB" />
+  <rect x="106" y="263" width="34" height="27" rx="8" fill="#7FC5A3" />
+  <rect x="145" y="268" width="25" height="22" rx="7" fill="#B5DCCB" />
+
+  <!-- Center flask with orange liquid. -->
+  <g clip-path="url(#flask-interior)">
+    <path d="M145 324C165 312 181 338 202 326C222 315 238 340 259 327C280 314 296 339 317 326C337 314 351 335 367 321V430H145V324Z" fill="#EC753C" />
+    <circle cx="247" cy="377" r="15" fill="#FFFFFF" />
+    <circle cx="303" cy="352" r="8" fill="#F6BDA1" />
+  </g>
+  <path d="M218 160H294" stroke="#453E3B" stroke-width="14" stroke-linecap="round" />
+  <path d="M234 160V239C234 254 230 269 221 281L151 372C133 395 150 427 179 427H333C362 427 379 395 361 372L291 281C282 269 278 254 278 239V160" stroke="#453E3B" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="248" cy="288" r="7" fill="#EC753C" />
+  <circle cx="272" cy="307" r="6" fill="#EC753C" />
+
+  <!-- Check tile and ascending bars. -->
+  <rect x="373" y="142" width="77" height="72" rx="15" fill="#7FC5A3" />
+  <path d="M394 178L408 192L432 163" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M411 214V254" stroke="#7FC5A3" stroke-width="12" stroke-linecap="round" />
+  <rect x="373" y="332" width="27" height="67" rx="5" fill="#EC753C" />
+  <rect x="412" y="306" width="27" height="93" rx="5" fill="#F0C34D" />
+  <rect x="451" y="279" width="27" height="120" rx="5" fill="#BDD87A" />
+</svg>
