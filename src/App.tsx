@@ -21,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { TerminalPane, type TerminalSession } from "@/components/TerminalPane";
+import { ManagedDialog } from "@/components/ManagedDialog";
 import { countReviewFilterResults, filterActiveSessions, isUnreviewedTerminal, nextReviewingSessionIdAfterReopen, retainReviewingSessionId } from "@/session-filter.mjs";
 import { isSessionSortMode, moveSessionInOrder, preserveSessionOrder, sessionOrderDiffers, sortSessions, type SessionSortMode } from "@/session-sort.mjs";
 import type { SessionStatus, ThemeSetting } from "@/vite-env";
@@ -438,29 +439,6 @@ export default function App() {
   useEffect(() => () => {
     if (sidebarHoverCloseTimer.current !== null) window.clearTimeout(sidebarHoverCloseTimer.current);
   }, []);
-
-  useEffect(() => {
-    const dialog = composerRef.current;
-    if (!dialog) return;
-    if (composerOpen && !dialog.open) {
-      dialog.showModal();
-      requestAnimationFrame(() => document.getElementById("new-session-folder")?.focus());
-    } else if (!composerOpen && dialog.open) dialog.close();
-  }, [composerOpen]);
-
-  useEffect(() => {
-    const dialog = usageRef.current;
-    if (!dialog) return;
-    if (usageOpen && !dialog.open) dialog.showModal();
-    else if (!usageOpen && dialog.open) dialog.close();
-  }, [usageOpen]);
-
-  useEffect(() => {
-    const dialog = settingsRef.current;
-    if (!dialog) return;
-    if (settingsOpen && !dialog.open) dialog.showModal();
-    else if (!settingsOpen && dialog.open) dialog.close();
-  }, [settingsOpen]);
 
   useEffect(() => {
     const handleZoomShortcut = (event: KeyboardEvent) => {
@@ -991,7 +969,7 @@ export default function App() {
         </main>
       </div>
 
-      <dialog ref={settingsRef} className="app-dialog settings-dialog" onCancel={(event) => { event.preventDefault(); setSettingsOpen(false); }} onClose={() => setSettingsOpen(false)} onClick={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}>
+      <ManagedDialog open={settingsOpen} onOpenChange={setSettingsOpen} dialogRef={settingsRef} className="app-dialog settings-dialog">
         <div className="dialog-card">
           <div className="dialog-heading"><div><div className="dialog-kicker">CIMLINE</div><h2>設定</h2><p>表示テーマを選べます。拡大率は Ctrl / Cmd + / − で調整、0 でリセットできます。</p></div><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setSettingsOpen(false)}><X size={17} /></button></div>
           <fieldset className="settings-group">
@@ -1008,9 +986,9 @@ export default function App() {
             ))}
           </fieldset>
         </div>
-      </dialog>
+      </ManagedDialog>
 
-      <dialog ref={composerRef} className="app-dialog new-session-dialog" onCancel={(event) => { event.preventDefault(); setComposerOpen(false); }} onClose={() => setComposerOpen(false)} onClick={(event) => { if (event.target === event.currentTarget) setComposerOpen(false); }}>
+      <ManagedDialog open={composerOpen} onOpenChange={setComposerOpen} dialogRef={composerRef} className="app-dialog new-session-dialog" initialFocusSelector="#new-session-folder">
         <form className="dialog-card" onSubmit={createSession}>
           <div className="dialog-heading">
             <div><div className="dialog-kicker">NEW TERMINAL</div><h2>新しいターミナル</h2><p>フォルダーとCLIを選んで、対話型セッションを開始します。</p></div>
@@ -1043,9 +1021,9 @@ export default function App() {
             <button type="submit" className="primary-button" disabled={creatingSession || !folderPath.trim()}>{creatingSession ? <LoaderCircle size={15} className="spin" /> : <Plus size={15} />}{creatingSession ? "起動中…" : "作成"}</button>
           </div>
         </form>
-      </dialog>
+      </ManagedDialog>
 
-      <dialog ref={usageRef} className="app-dialog usage-dialog" onCancel={(event) => { event.preventDefault(); setUsageOpen(false); }} onClose={() => setUsageOpen(false)} onClick={(event) => { if (event.target === event.currentTarget) setUsageOpen(false); }}>
+      <ManagedDialog open={usageOpen} onOpenChange={setUsageOpen} dialogRef={usageRef} className="app-dialog usage-dialog">
         <div className="dialog-card">
           <div className="dialog-heading"><div><div className="dialog-kicker">CODEX CLI</div><h2>使用量</h2><p>Codex CLIの5時間枠・週間枠を表示します。Claude Codeは対象外です。</p></div><div className="dialog-heading-actions"><button className="icon-button" type="button" aria-label="利用枠を更新" title="利用枠を更新" onClick={() => void refreshUsage()} disabled={rateLimitsLoading}><RefreshCw size={15} className={rateLimitsLoading ? "spin" : ""} /></button><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setUsageOpen(false)}><X size={17} /></button></div></div>
           {rateLimitsLoading && !rateLimits ? <div className="dialog-state"><LoaderCircle size={16} className="spin" />利用枠を取得しています…</div> : rateWindows.length ? <div className="rate-window-list">{rateWindows.map((window, index) => {
@@ -1060,7 +1038,7 @@ export default function App() {
           })}</div> : <div className="dialog-state is-error">{rateLimitsError || "利用枠の情報を取得できませんでした。"}</div>}
           <div className="usage-note"><CircleDot size={12} />Codex CLIの5時間・週間利用枠を表示しています。</div>
         </div>
-      </dialog>
+      </ManagedDialog>
 
       {toast && <div className={"toast" + (toast.error ? " is-error" : "")} role="status">{toast.message}</div>}
     </div>

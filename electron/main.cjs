@@ -8,6 +8,7 @@ const { randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { fileURLToPath } = require("node:url");
 const pty = require("node-pty");
 const { selectCodexRateLimits } = require("./rate-limits.cjs");
+const { writeFileAtomically } = require("./file-utils.cjs");
 
 const APP_USER_MODEL_ID = "local.codex.rundesk";
 if (process.platform === "win32") app.setAppUserModelId(APP_USER_MODEL_ID);
@@ -98,15 +99,7 @@ async function persistSettings() {
   if (!settingsStorePath) return;
   const write = async () => {
     const contents = JSON.stringify({ theme: themeSetting, zoomFactor }, null, 2);
-    const temporaryPath = settingsStorePath + "." + process.pid + "." + Date.now() + "." + Math.random().toString(16).slice(2) + ".tmp";
-    await fs.promises.mkdir(path.dirname(settingsStorePath), { recursive: true });
-    try {
-      await fs.promises.writeFile(temporaryPath, contents, "utf8");
-      await fs.promises.rename(temporaryPath, settingsStorePath);
-    } catch (error) {
-      await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
-      throw error;
-    }
+    await writeFileAtomically(settingsStorePath, contents);
   };
   settingsWriteChain = settingsWriteChain.catch(() => {}).then(write);
   return settingsWriteChain;
@@ -233,15 +226,7 @@ function queueSessionSave() {
     sessions: [...sessions.values()].slice(-MAX_SESSIONS).map(serializePersistedSession),
   }, null, 2);
   const write = async () => {
-    await fs.promises.mkdir(path.dirname(sessionStorePath), { recursive: true });
-    const temporaryPath = sessionStorePath + "." + process.pid + "." + Date.now() + "." + Math.random().toString(16).slice(2) + ".tmp";
-    try {
-      await fs.promises.writeFile(temporaryPath, contents, "utf8");
-      await fs.promises.rename(temporaryPath, sessionStorePath);
-    } catch (error) {
-      await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
-      throw error;
-    }
+    await writeFileAtomically(sessionStorePath, contents);
   };
   sessionWriteChain = sessionWriteChain.catch(() => {}).then(write);
   sessionWriteChain.catch((error) => console.error("セッション履歴の保存に失敗しました:", error));
