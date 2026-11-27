@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { selectCodexRateLimits } = require("../electron/rate-limits.cjs");
+const { selectCodexRateLimits } = require("../electron/features/usage/rate-limits.cjs");
 
 const window = (usedPercent, windowDurationMins, resetsAt) => ({ usedPercent, windowDurationMins, resetsAt });
 

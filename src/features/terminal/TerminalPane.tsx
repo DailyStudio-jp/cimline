@@ -3,12 +3,10 @@ import { ArrowDown, Terminal as TerminalIcon, X } from "lucide-react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { buildImagePastePayloads, flushQueuedImagePastePayloads, isSupportedImageName, MAX_DROPPED_IMAGES, pasteOrQueueImagePayloads, shouldClearImageDropOverlay } from "@/image-drop.mjs";
-import { getCliSessionTitle } from "@/session-title.mjs";
-import { ScrollbackClearFilter } from "@/terminal-output.mjs";
-import type { CimLineSession } from "@/vite-env";
-
-export type TerminalSession = CimLineSession;
+import { buildImagePastePayloads, flushQueuedImagePastePayloads, isSupportedImageName, MAX_DROPPED_IMAGES, pasteOrQueueImagePayloads, shouldClearImageDropOverlay } from "@/features/terminal/image-drop.mjs";
+import { getCliSessionTitle } from "@/features/sessions/session-title.mjs";
+import { ScrollbackClearFilter } from "@/features/terminal/terminal-output.mjs";
+import type { TerminalSession } from "@/features/sessions/types";
 
 type PtyBridge = {
   platform?: string;

@@ -6,10 +6,17 @@ CimLine is an Electron desktop workspace for real Claude Code and Codex CLI sess
 
 ## Structure
 
-- `electron/main.cjs`: starts shells and CLI sessions, owns PTYs, persists session metadata, and handles Electron IPC.
+- `electron/main.cjs`: application composition root for Electron windows, PTYs, and IPC.
+- `electron/features/usage/`: Codex usage-window logic.
+- `electron/features/notifications/`: CLI notification hook.
+- `electron/shared/`: reusable Electron infrastructure such as atomic file writes.
 - `electron/preload.cjs`: exposes the narrow desktop API to the renderer.
-- `src/App.tsx`: dashboard, folder and CLI selection, session history, usage and skills dialogs.
-- `src/components/TerminalPane.tsx`: xterm lifecycle, input/output, resize, and clipboard behavior.
+- `src/App.tsx`: composes the workspace and coordinates app-level state.
+- `src/features/sessions/`: session ordering, filtering, titles, and new-session UI.
+- `src/features/terminal/`: terminal pane, input/output, image drops, resize, and clipboard behavior.
+- `src/features/settings/`: appearance settings UI.
+- `src/features/usage/`: Codex usage UI and types.
+- `src/components/ui/`: shared UI primitives and dialog behavior.
 - `src/index.css`: dashboard and terminal styling.
 
 Keep filesystem and process access in Electron main. Do not enable renderer Node integration. Validate all IPC inputs and keep terminal access scoped to session IDs.

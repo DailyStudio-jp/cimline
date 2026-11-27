@@ -9,7 +9,7 @@ import {
   quoteDroppedImagePath,
   sanitizeDroppedImagePaths,
   shouldClearImageDropOverlay,
-} from "../src/image-drop.mjs";
+} from "../src/features/terminal/image-drop.mjs";
 
 test("image detection accepts common CLI image types and rejects ambiguous formats", () => {
   for (const name of ["screenshot.png", "画像.JPG", "photo.jpeg", "motion.gif", "capture.webp"]) {

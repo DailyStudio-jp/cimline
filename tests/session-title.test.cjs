@@ -4,7 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "../src/session-title.mjs"), "utf8");
+const source = fs.readFileSync(path.join(__dirname, "../src/features/sessions/session-title.mjs"), "utf8");
 const moduleSource = source.replace("export function getCliSessionTitle", "function getCliSessionTitle") + "\nmodule.exports = { getCliSessionTitle };";
 const sessionTitle = { exports: {} };
 vm.runInNewContext(moduleSource, { module: sessionTitle, exports: sessionTitle.exports }, { filename: "session-title.mjs" });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ScrollbackClearFilter } from "../src/terminal-output.mjs";
+import { ScrollbackClearFilter } from "../src/features/terminal/terminal-output.mjs";
 
 test("removes complete scrollback-clear sequences and keeps surrounding output", () => {
   const filter = new ScrollbackClearFilter();

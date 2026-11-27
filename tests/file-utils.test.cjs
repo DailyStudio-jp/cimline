@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { writeFileAtomically } = require("../electron/file-utils.cjs");
+const { writeFileAtomically } = require("../electron/shared/file-utils.cjs");
 
 async function withTempDirectory(run) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cimline-atomic-write-"));

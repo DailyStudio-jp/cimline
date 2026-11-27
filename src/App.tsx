@@ -2,34 +2,29 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import {
   Activity,
   AlertCircle,
-  Check,
   CircleDot,
-  Code2,
   ChevronLeft,
   ChevronRight,
-  Copy,
   Folder,
-  FolderOpen,
   LoaderCircle,
   Plus,
   RefreshCw,
   Search,
   Settings2,
-  Sparkles,
   Terminal as TerminalIcon,
   Trash2,
-  X,
 } from "lucide-react";
-import { TerminalPane, type TerminalSession } from "@/components/TerminalPane";
-import { ManagedDialog } from "@/components/ManagedDialog";
-import { countReviewFilterResults, filterActiveSessions, isUnreviewedTerminal, nextReviewingSessionIdAfterReopen, retainReviewingSessionId } from "@/session-filter.mjs";
-import { isSessionSortMode, moveSessionInOrder, preserveSessionOrder, sessionOrderDiffers, sortSessions, type SessionSortMode } from "@/session-sort.mjs";
+import { TerminalPane } from "@/features/terminal/TerminalPane";
+import { NewSessionDialog } from "@/features/sessions/NewSessionDialog";
+import { SettingsDialog } from "@/features/settings/SettingsDialog";
+import { countReviewFilterResults, filterActiveSessions, isUnreviewedTerminal, nextReviewingSessionIdAfterReopen, retainReviewingSessionId } from "@/features/sessions/session-filter.mjs";
+import { isSessionSortMode, moveSessionInOrder, preserveSessionOrder, sessionOrderDiffers, sortSessions, type SessionSortMode } from "@/features/sessions/session-sort.mjs";
+import type { CliKind, TerminalSession } from "@/features/sessions/types";
+import { UsageDialog } from "@/features/usage/UsageDialog";
+import type { RateLimits } from "@/features/usage/types";
 import type { SessionStatus, ThemeSetting } from "@/vite-env";
 import { Separator } from "@/components/ui/separator";
 
-type CliKind = "codex" | "claude";
-type RateWindow = { usedPercent: number; windowDurationMins: number | null; resetsAt: number | null };
-type RateLimits = { primary: RateWindow | null; secondary: RateWindow | null };
 type AppState = { sessions: TerminalSession[]; focusedSessionId?: string | null; restoreLegacySessionOrder?: boolean; cliAvailable: { codex: boolean; claude: boolean }; defaultDirectory: string; theme: ThemeSetting; zoomFactor: number };
 type CimLineBridge = {
   platform?: string;
@@ -88,17 +83,6 @@ function errorText(error: unknown) {
     .replace(/\b(?:sk|sess|rk)-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
     .replace(/[\r\n\t]+/g, " ")
     .slice(0, 320);
-}
-
-function resetLabel(timestamp: number | null) {
-  if (!timestamp) return "リセット時刻不明";
-  return new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp * 1000));
-}
-
-function windowLabel(window: RateWindow) {
-  if (window.windowDurationMins && window.windowDurationMins >= 10000) return "週間枠";
-  if (window.windowDurationMins && window.windowDurationMins >= 300) return "5時間枠";
-  return "利用枠";
 }
 
 function loadRecentFolders() {
@@ -530,11 +514,6 @@ export default function App() {
     .filter((session) => session.closed)
     .filter((session) => !query || [sessionDisplayTitle(session), session.title, session.cwd, cliName(session.cli)].some((value) => value.toLowerCase().includes(query)))
     .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()), [sessions, query]);
-  const rateWindows = useMemo(() => rateLimits
-    ? [rateLimits.primary, rateLimits.secondary].filter((item): item is RateWindow => Boolean(item))
-      .sort((left, right) => (left.windowDurationMins ?? Number.MAX_SAFE_INTEGER) - (right.windowDurationMins ?? Number.MAX_SAFE_INTEGER))
-    : [], [rateLimits]);
-
   useLayoutEffect(() => {
     const grid = terminalGridRef.current;
     if (!grid) {
@@ -969,76 +948,35 @@ export default function App() {
         </main>
       </div>
 
-      <ManagedDialog open={settingsOpen} onOpenChange={setSettingsOpen} dialogRef={settingsRef} className="app-dialog settings-dialog">
-        <div className="dialog-card">
-          <div className="dialog-heading"><div><div className="dialog-kicker">CIMLINE</div><h2>設定</h2><p>表示テーマを選べます。拡大率は Ctrl / Cmd + / − で調整、0 でリセットできます。</p></div><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setSettingsOpen(false)}><X size={17} /></button></div>
-          <fieldset className="settings-group">
-            <legend>テーマ</legend>
-            {([
-              ["system", "システムに合わせる", "WindowsまたはmacOSの外観設定を使います。"],
-              ["light", "ライト", "明るい配色を使います。"],
-              ["dark", "ダーク", "暗い配色を使います。"],
-            ] as const).map(([value, label, description]) => (
-              <label className={"settings-option" + (themeSetting === value ? " selected" : "")} key={value}>
-                <input type="radio" name="theme" value={value} checked={themeSetting === value} onChange={() => void chooseTheme(value)} />
-                <span><strong>{label}</strong><small>{description}</small></span>
-              </label>
-            ))}
-          </fieldset>
-        </div>
-      </ManagedDialog>
-
-      <ManagedDialog open={composerOpen} onOpenChange={setComposerOpen} dialogRef={composerRef} className="app-dialog new-session-dialog" initialFocusSelector="#new-session-folder">
-        <form className="dialog-card" onSubmit={createSession}>
-          <div className="dialog-heading">
-            <div><div className="dialog-kicker">NEW TERMINAL</div><h2>新しいターミナル</h2><p>フォルダーとCLIを選んで、対話型セッションを開始します。</p></div>
-            <button type="button" className="icon-button" aria-label="閉じる" onClick={() => setComposerOpen(false)}><X size={17} /></button>
-          </div>
-          {bridgeError && <div className="inline-error"><AlertCircle size={14} />{bridgeError}</div>}
-          <label className="field-label" htmlFor="new-session-folder">作業フォルダー</label>
-          <div className="folder-field">
-            <FolderOpen size={16} />
-            <input id="new-session-folder" value={folderPath} onChange={(event) => { setFolderPath(event.target.value); setFolderPathCopied(false); }} placeholder={defaultDirectory || "フォルダーを選択"} spellCheck={false} required />
-            <button type="button" className={"folder-copy-button" + (folderPathCopied ? " is-copied" : "")} aria-label={folderPathCopied ? "パスをコピーしました" : "パスをコピー"} title={folderPathCopied ? "コピー済み" : "パスをコピー"} disabled={!folderPath.trim()} onClick={() => void copyFolderPath()}>{folderPathCopied ? <Check size={14} /> : <Copy size={14} />}{folderPathCopied && <span>コピー済み</span>}</button>
-            <button type="button" className="outline-button" onClick={() => void chooseFolder()}>選択</button>
-          </div>
-          <div className="field-label cli-picker-label">CLI</div>
-          <div className="cli-picker">
-            <label className={"cli-choice is-codex" + (selectedCli === "codex" ? " is-selected" : "")}>
-              <input type="radio" name="cli" value="codex" checked={selectedCli === "codex"} onChange={() => setSelectedCli("codex")} />
-              <Code2 size={20} /><span><strong>Codex CLI</strong><small>{cliAvailable.codex ? "利用できます" : "インストールされていない可能性があります"}</small></span>
-              {selectedCli === "codex" && <Check size={17} />}
-            </label>
-            <label className={"cli-choice is-claude" + (selectedCli === "claude" ? " is-selected" : "")}>
-              <input type="radio" name="cli" value="claude" checked={selectedCli === "claude"} onChange={() => setSelectedCli("claude")} />
-              <Sparkles size={20} /><span><strong>Claude Code</strong><small>{cliAvailable.claude ? "利用できます" : "インストールされていない可能性があります"}</small></span>
-              {selectedCli === "claude" && <Check size={17} />}
-            </label>
-          </div>
-          <div className="dialog-footer">
-            <span>{cliAvailable[selectedCli] ? "選択したCLIをシェル内で起動します。" : cliName(selectedCli) + "が見つからない場合は環境変数で実行パスを指定できます。"}</span>
-            <button type="button" className="text-button" onClick={() => setComposerOpen(false)}>キャンセル</button>
-            <button type="submit" className="primary-button" disabled={creatingSession || !folderPath.trim()}>{creatingSession ? <LoaderCircle size={15} className="spin" /> : <Plus size={15} />}{creatingSession ? "起動中…" : "作成"}</button>
-          </div>
-        </form>
-      </ManagedDialog>
-
-      <ManagedDialog open={usageOpen} onOpenChange={setUsageOpen} dialogRef={usageRef} className="app-dialog usage-dialog">
-        <div className="dialog-card">
-          <div className="dialog-heading"><div><div className="dialog-kicker">CODEX CLI</div><h2>使用量</h2><p>Codex CLIの5時間枠・週間枠を表示します。Claude Codeは対象外です。</p></div><div className="dialog-heading-actions"><button className="icon-button" type="button" aria-label="利用枠を更新" title="利用枠を更新" onClick={() => void refreshUsage()} disabled={rateLimitsLoading}><RefreshCw size={15} className={rateLimitsLoading ? "spin" : ""} /></button><button type="button" className="icon-button" aria-label="閉じる" onClick={() => setUsageOpen(false)}><X size={17} /></button></div></div>
-          {rateLimitsLoading && !rateLimits ? <div className="dialog-state"><LoaderCircle size={16} className="spin" />利用枠を取得しています…</div> : rateWindows.length ? <div className="rate-window-list">{rateWindows.map((window, index) => {
-            const used = Math.max(0, Math.min(100, window.usedPercent));
-            const remaining = 100 - used;
-            const kind = used >= 90 ? " is-critical" : used >= 70 ? " is-warning" : "";
-            return <section className={"rate-window" + kind} key={window.windowDurationMins || index}>
-              <div className="rate-window-heading"><span>{windowLabel(window)}</span><strong>{Math.round(remaining)}% <small>残り</small></strong></div>
-              <div className="rate-window-track"><span style={{ width: used + "%" }} /></div>
-              <div className="rate-window-foot"><span>{Math.round(used)}% 使用済み</span><small>リセット {resetLabel(window.resetsAt)}</small></div>
-            </section>;
-          })}</div> : <div className="dialog-state is-error">{rateLimitsError || "利用枠の情報を取得できませんでした。"}</div>}
-          <div className="usage-note"><CircleDot size={12} />Codex CLIの5時間・週間利用枠を表示しています。</div>
-        </div>
-      </ManagedDialog>
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} dialogRef={settingsRef} themeSetting={themeSetting} onChooseTheme={chooseTheme} />
+      <NewSessionDialog
+        open={composerOpen}
+        onOpenChange={setComposerOpen}
+        dialogRef={composerRef}
+        folderPath={folderPath}
+        onFolderPathChange={setFolderPath}
+        folderPathCopied={folderPathCopied}
+        onFolderPathCopiedChange={setFolderPathCopied}
+        defaultDirectory={defaultDirectory}
+        bridgeError={bridgeError}
+        cliAvailable={cliAvailable}
+        selectedCli={selectedCli}
+        onSelectedCliChange={setSelectedCli}
+        creatingSession={creatingSession}
+        onCopyFolderPath={copyFolderPath}
+        onChooseFolder={chooseFolder}
+        onSubmit={createSession}
+        getCliDisplayName={cliName}
+      />
+      <UsageDialog
+        open={usageOpen}
+        onOpenChange={setUsageOpen}
+        dialogRef={usageRef}
+        rateLimits={rateLimits}
+        loading={rateLimitsLoading}
+        error={rateLimitsError}
+        onRefresh={refreshUsage}
+      />
 
       {toast && <div className={"toast" + (toast.error ? " is-error" : "")} role="status">{toast.message}</div>}
     </div>

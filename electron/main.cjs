@@ -7,8 +7,8 @@ const path = require("node:path");
 const { randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const { fileURLToPath } = require("node:url");
 const pty = require("node-pty");
-const { selectCodexRateLimits } = require("./rate-limits.cjs");
-const { writeFileAtomically } = require("./file-utils.cjs");
+const { selectCodexRateLimits } = require("./features/usage/rate-limits.cjs");
+const { writeFileAtomically } = require("./shared/file-utils.cjs");
 
 const APP_USER_MODEL_ID = "local.codex.rundesk";
 if (process.platform === "win32") app.setAppUserModelId(APP_USER_MODEL_ID);
@@ -1407,7 +1407,7 @@ function ensureSessionHooks(session) {
   try {
     const safeId = Buffer.from(session.id, "utf8").toString("base64url") || "session";
     const hookDirectory = path.join(app.getPath("userData"), "hooks", safeId);
-    const hookScript = path.join(__dirname, "notify-hook.cjs");
+    const hookScript = path.join(__dirname, "features", "notifications", "notify-hook.cjs");
     fs.mkdirSync(hookDirectory, { recursive: true });
 
     let wrapperPath;

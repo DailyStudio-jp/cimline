@@ -6,7 +6,7 @@ import {
   isUnreviewedTerminal,
   nextReviewingSessionIdAfterReopen,
   retainReviewingSessionId,
-} from "../src/session-filter.mjs";
+} from "../src/features/sessions/session-filter.mjs";
 
 const sessions = [
   { id: "done", title: "Build UI", cwd: "F:/cimline", cli: "codex", status: "completed", unreviewed: true, closed: false },
