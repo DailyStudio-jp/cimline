@@ -184,6 +184,9 @@ export default function App() {
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const [heldSessionOrder, setHeldSessionOrder] = useState<string[] | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readJson<boolean>(sidebarCollapsedStorageKey, false));
+  const [sidebarHovered, setSidebarHovered] = useState(false);
+  const [sidebarFocusWithin, setSidebarFocusWithin] = useState(false);
+  const sidebarHoverCloseTimer = useRef<number | null>(null);
   const [search, setSearch] = useState("");
   const [showUnreviewedOnly, setShowUnreviewedOnly] = useState(false);
   const [folderPath, setFolderPath] = useState("");
@@ -432,6 +435,10 @@ export default function App() {
     if (sortHoldTimerRef.current !== null) window.clearTimeout(sortHoldTimerRef.current);
   }, []);
 
+  useEffect(() => () => {
+    if (sidebarHoverCloseTimer.current !== null) window.clearTimeout(sidebarHoverCloseTimer.current);
+  }, []);
+
   useEffect(() => {
     const dialog = composerRef.current;
     if (!dialog) return;
@@ -530,6 +537,9 @@ export default function App() {
   displayedOrderRef.current = displayedOrder;
   const sortUpdatePending = heldSessionOrder !== null && sessionOrderDiffers(sortedActiveSessions, displayedOrder);
   const sidebarWidth = sidebarCollapsed ? 58 : 212;
+  const sidebarIsCompact = sidebarCollapsed || viewportWidth <= 620;
+  const sidebarPeek = sidebarIsCompact && (sidebarHovered || sidebarFocusWithin);
+  const sidebarToggleLabel = sidebarPeek ? "サイドバーを常時展開" : sidebarIsCompact ? "サイドバーを展開" : "サイドバーを収納";
   const maxVisibleColumns = Math.max(1, Math.min(6, Math.floor(Math.max(320, viewportWidth - sidebarWidth - 32) / 320)));
   const visibleColumns = Math.min(terminalColumns, maxVisibleColumns);
 
@@ -800,17 +810,50 @@ export default function App() {
 
   function toggleSidebar() {
     const next = !sidebarCollapsed;
+    if (next) {
+      if (sidebarHoverCloseTimer.current !== null) window.clearTimeout(sidebarHoverCloseTimer.current);
+      sidebarHoverCloseTimer.current = null;
+      setSidebarHovered(false);
+      setSidebarFocusWithin(false);
+    }
     setSidebarCollapsed(next);
     localStorage.setItem(sidebarCollapsedStorageKey, JSON.stringify(next));
   }
 
   return (
     <div className={"app-shell" + (sidebarCollapsed ? " is-sidebar-collapsed" : "")}>
-      <aside className="sidebar" id="primary-sidebar">
+      <div
+        className={"sidebar-dock" + (sidebarPeek ? " is-peeking" : "")}
+        onFocusCapture={(event) => {
+          setSidebarFocusWithin(event.target instanceof HTMLElement && event.target.matches(":focus-visible"));
+        }}
+        onBlurCapture={(event) => {
+          const nextTarget = event.relatedTarget;
+          if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) setSidebarFocusWithin(false);
+        }}
+      >
+      <aside
+        className="sidebar"
+        id="primary-sidebar"
+        onPointerEnter={(event) => {
+          if (event.pointerType !== "mouse") return;
+          if (sidebarHoverCloseTimer.current !== null) window.clearTimeout(sidebarHoverCloseTimer.current);
+          sidebarHoverCloseTimer.current = null;
+          setSidebarHovered(true);
+        }}
+        onPointerLeave={(event) => {
+          if (event.pointerType !== "mouse") return;
+          if (sidebarHoverCloseTimer.current !== null) window.clearTimeout(sidebarHoverCloseTimer.current);
+          sidebarHoverCloseTimer.current = window.setTimeout(() => {
+            sidebarHoverCloseTimer.current = null;
+            setSidebarHovered(false);
+          }, 240);
+        }}
+      >
         <div className="brand-lockup">
           <div className="brand-mark"><span /></div>
           <div className="brand-copy"><strong>CimLine</strong><small>CLI WORKSPACE</small></div>
-          <button className="sidebar-toggle" type="button" onClick={toggleSidebar} aria-controls="primary-sidebar" aria-expanded={!sidebarCollapsed} aria-label={sidebarCollapsed ? "サイドバーを展開" : "サイドバーを収納"} title={sidebarCollapsed ? "サイドバーを展開" : "サイドバーを収納"}>
+          <button className="sidebar-toggle" type="button" onClick={toggleSidebar} aria-controls="primary-sidebar" aria-expanded={!sidebarIsCompact || sidebarPeek} aria-label={sidebarToggleLabel} title={sidebarToggleLabel}>
             {sidebarCollapsed ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
           </button>
         </div>
@@ -858,6 +901,7 @@ export default function App() {
           <p>{cliAvailable.codex ? "Codex" : "Codex 未検出"}<span> · </span>{cliAvailable.claude ? "Claude" : "Claude 未検出"}</p>
         </div>
       </aside>
+      </div>
 
       <div className="main-column">
         <header className="topbar">
