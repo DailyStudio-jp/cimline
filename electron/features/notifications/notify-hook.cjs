@@ -15,7 +15,14 @@ function getEvent(args) {
   const payloadText = args[args.length - 1];
   if (typeof payloadText !== "string") return null;
   let eventType = payloadText;
-  if (payloadText.startsWith("{")) eventType = /^\s*\{\s*"type"\s*:\s*"([^"\\]+)"/.exec(payloadText)?.[1] || null;
+  if (payloadText.trimStart().startsWith("{")) {
+    try {
+      const payload = JSON.parse(payloadText);
+      eventType = payload && typeof payload === "object" && !Array.isArray(payload) ? payload.type : null;
+    } catch {
+      return null;
+    }
+  }
   return eventType === "agent-turn-complete" ? "completed" : null;
 }
 
